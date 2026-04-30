@@ -1,0 +1,234 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-gray-200;
+  }
+
+  body {
+    @apply bg-gradient-to-br from-gray-50 via-blue-50/30 to-purple-50/30 text-gray-900 font-sans antialiased;
+  }
+
+  /* Custom Apple-style scrollbar */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gray-300 rounded-full;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-400;
+  }
+
+  /* Dark mode */
+  .dark body {
+    @apply bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 text-gray-50;
+  }
+
+  .dark ::-webkit-scrollbar-thumb {
+    @apply bg-gray-700;
+  }
+
+  .dark ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-600;
+  }
+}
+
+@layer components {
+
+  /* Apple-style Buttons */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 text-[15px] font-semibold rounded-apple transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed shadow-apple;
+  }
+
+  .btn-primary {
+    @apply btn bg-gradient-to-b from-blue-500 to-blue-600 text-white hover:from-blue-600 hover:to-blue-700 active:scale-95 shadow-glow-blue;
+  }
+
+  .btn-secondary {
+    @apply btn bg-gradient-to-b from-orange-500 to-orange-600 text-white hover:from-orange-600 hover:to-orange-700 active:scale-95 shadow-sm;
+  }
+
+  .btn-ghost {
+    @apply btn bg-transparent text-gray-700 hover:bg-gray-100/80 active:scale-95 shadow-none dark:text-gray-300 dark:hover:bg-gray-800/80;
+  }
+
+  .btn-danger {
+    @apply btn bg-gradient-to-b from-red-500 to-red-600 text-white hover:from-red-600 hover:to-red-700 active:scale-95;
+  }
+
+  .btn-success {
+    @apply btn bg-gradient-to-b from-green-500 to-green-600 text-white hover:from-green-600 hover:to-green-700 active:scale-95;
+  }
+
+  /* Apple Glass Cards */
+  .card {
+    @apply bg-white/80 backdrop-blur-xl border border-white/20 rounded-apple-lg p-6 shadow-apple text-gray-900;
+  }
+
+  .card-hover {
+    @apply card hover:shadow-apple-lg hover:scale-[1.02] transition-all duration-300;
+  }
+
+  .glass-card {
+    @apply bg-white/70 backdrop-blur-xl border border-white/40 rounded-apple-xl p-6 shadow-apple-lg text-gray-900;
+  }
+
+  /* Dark mode cards */
+  .dark .card {
+    @apply bg-gray-800/80 border-gray-700/50;
+  }
+
+  .dark .glass-card {
+    @apply bg-gray-800/60 border-gray-700/40;
+  }
+
+  /* Apple-style Inputs */
+  .input {
+    @apply w-full px-4 py-3 bg-white/90 border border-gray-200 rounded-apple text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 shadow-sm;
+  }
+
+  .textarea {
+    @apply input min-h-[120px] resize-y;
+  }
+
+  .label {
+    @apply block text-[15px] font-semibold text-gray-700 mb-2;
+  }
+
+  /* Dark mode inputs */
+  .dark .input {
+    @apply bg-gray-800/90 border-gray-700 text-gray-100 placeholder-gray-500 focus:ring-blue-500;
+  }
+
+  .dark .label {
+    @apply text-gray-300;
+  }
+
+  /* Task type badges with gradients */
+  .badge {
+    @apply inline-flex items-center px-3 py-1 text-xs font-bold rounded-full shadow-sm;
+  }
+
+  .badge-deep-focus {
+    @apply badge bg-gradient-to-r from-purple-500 to-purple-600 text-white;
+  }
+
+  .badge-light-focus {
+    @apply badge bg-gradient-to-r from-blue-500 to-blue-600 text-white;
+  }
+
+  .badge-admin {
+    @apply badge bg-gradient-to-r from-orange-500 to-orange-600 text-white;
+  }
+
+  .badge-physical {
+    @apply badge bg-gradient-to-r from-green-500 to-green-600 text-white;
+  }
+
+  .badge-recovery {
+    @apply badge bg-gradient-to-r from-teal-500 to-teal-600 text-white;
+  }
+
+  /* Priority indicators with Apple colors */
+  .priority-high {
+    @apply text-red-500 font-bold;
+  }
+
+  .priority-medium {
+    @apply text-orange-500 font-bold;
+  }
+
+  .priority-low {
+    @apply text-green-500 font-bold;
+  }
+
+  /* Effort indicators */
+  .effort-indicator {
+    @apply w-2.5 h-2.5 rounded-full shadow-sm;
+  }
+
+  .effort-1 {
+    @apply bg-gradient-to-br from-green-400 to-green-500;
+  }
+
+  .effort-2 {
+    @apply bg-gradient-to-br from-teal-400 to-teal-500;
+  }
+
+  .effort-3 {
+    @apply bg-gradient-to-br from-orange-400 to-orange-500;
+  }
+
+  .effort-4 {
+    @apply bg-gradient-to-br from-red-400 to-red-500;
+  }
+
+  .effort-5 {
+    @apply bg-gradient-to-br from-purple-400 to-purple-500;
+  }
+
+  /* Apple-style navigation */
+  .nav-item {
+    @apply flex items-center gap-2 px-3 py-1.5 rounded-apple text-sm text-gray-700 hover:bg-gray-100/80 active:scale-95 transition-all duration-200 font-medium;
+  }
+
+  .nav-item.active {
+    @apply bg-blue-500 text-white shadow-glow-blue;
+  }
+
+  .dark .nav-item {
+    @apply text-gray-300 hover:bg-gray-800/80;
+  }
+
+  .dark .nav-item.active {
+    @apply bg-blue-500 text-white;
+  }
+}
+
+@layer utilities {
+  .gradient-text {
+    @apply bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 bg-clip-text text-transparent;
+  }
+
+  .gradient-text-blue {
+    @apply bg-gradient-to-r from-blue-500 to-teal-500 bg-clip-text text-transparent;
+  }
+
+  .gradient-text-purple {
+    @apply bg-gradient-to-r from-purple-500 to-pink-500 bg-clip-text text-transparent;
+  }
+
+  .glass {
+    @apply bg-white/80 backdrop-blur-xl;
+  }
+
+  .dark .glass {
+    @apply bg-gray-800/80;
+  }
+
+  .animate-enter {
+    @apply animate-slide-up;
+  }
+
+  .shimmer {
+    background: linear-gradient(90deg,
+        rgba(255, 255, 255, 0) 0%,
+        rgba(255, 255, 255, 0.2) 20%,
+        rgba(255, 255, 255, 0.5) 60%,
+        rgba(255, 255, 255, 0));
+    animation: shimmer 2s infinite;
+    background-size: 200% auto;
+  }
+}
