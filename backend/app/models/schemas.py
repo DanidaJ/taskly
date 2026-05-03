@@ -581,3 +581,70 @@ class RoutineTemplateResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ============================================
+# Focus Settings (Pomodoro / timer config)
+# ============================================
+
+class FocusSettingsBase(BaseModel):
+    focus_duration: int = Field(default=25, ge=1, le=240)
+    short_break_duration: int = Field(default=5, ge=1, le=60)
+    long_break_duration: int = Field(default=15, ge=1, le=120)
+    sessions_before_long_break: int = Field(default=4, ge=1, le=20)
+    auto_start_breaks: bool = False
+    auto_start_focus: bool = False
+    sound_enabled: bool = True
+
+
+class FocusSettingsResponse(FocusSettingsBase):
+    user_id: str
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+# ============================================
+# Sleep Goals (tracking targets)
+# ============================================
+
+class SleepGoalBase(BaseModel):
+    target_bedtime: str = "22:30"          # HH:MM
+    target_wake_time: str = "06:30"        # HH:MM
+    target_duration_hours: float = Field(default=8.0, ge=4.0, le=12.0)
+
+
+class SleepGoalResponse(SleepGoalBase):
+    user_id: str
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+# ============================================
+# User Patterns (AI-learned defaults)
+# ============================================
+
+class UserPatternBase(BaseModel):
+    category: str
+    key: str
+    value: str
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class UserPatternUpsert(UserPatternBase):
+    """Upsert by (user_id, category, key). Server bumps usage_count and last_used."""
+    pass
+
+
+class UserPatternResponse(UserPatternBase):
+    id: str
+    user_id: str
+    last_used: datetime
+    usage_count: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

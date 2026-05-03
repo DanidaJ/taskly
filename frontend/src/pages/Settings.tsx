@@ -22,12 +22,13 @@ import {
 import { useUserProfileStore, useAuthStore } from '@/stores';
 import { Commitment, EnergyPreference, CognitiveLoad, RecurringTask, RecurrenceType, RoutineTemplate, PresetTemplate } from '@/types';
 import { Button, Input, Modal } from '@/components/ui';
-import { commitmentService, profileService, recurringTaskService, routineTemplateService } from '@/services/api';
+import { commitmentService, profileService, recurringTaskService, routineTemplateService, notificationService as pushNotificationService, NotificationPreferences } from '@/services/api';
+import { requestNotificationPermission, ensureFcmTokenRegistered, unregisterFcmToken, getNotificationPermission, isPushSupported } from '@/services/firebase';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
 
 export default function Settings() {
-  const [activeTab, setActiveTab] = useState<'profile' | 'energy' | 'sleep' | 'commitments' | 'routines'>('profile');
+  const [activeTab, setActiveTab] = useState<'profile' | 'energy' | 'sleep' | 'commitments' | 'routines' | 'notifications'>('profile');
   const [isCommitmentModalOpen, setIsCommitmentModalOpen] = useState(false);
   const [isRecurringTaskModalOpen, setIsRecurringTaskModalOpen] = useState(false);
   const [recurringTasks, setRecurringTasks] = useState<RecurringTask[]>([]);
@@ -61,6 +62,28 @@ export default function Settings() {
   const [notificationsEnabled, setNotificationsEnabled] = useState(preferences?.notification_enabled ?? true);
   const [maxDailyHours, setMaxDailyHours] = useState(preferences?.max_daily_workload_hours || 8);
 
+  // Push notification settings (server-backed)
+  const DEFAULT_NOTIF_PREFS: NotificationPreferences = {
+    enabled: true,
+    task_reminders: true,
+    break_reminders: true,
+    daily_summary: true,
+    sleep_warning: true,
+    reflection_reminder: true,
+    achievement_notifications: true,
+    reminder_minutes_before: 15,
+    quiet_hours_start: '22:00',
+    quiet_hours_end: '08:00',
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    daily_summary_time: '20:00',
+    reflection_time: '20:30',
+  };
+  const [notifPrefs, setNotifPrefs] = useState<NotificationPreferences>(DEFAULT_NOTIF_PREFS);
+  const [notifPermission, setNotifPermission] = useState<NotificationPermission | null>(null);
+  const [pushSupported, setPushSupported] = useState<boolean>(true);
+  const [savingNotif, setSavingNotif] = useState(false);
+  const [testingNotif, setTestingNotif] = useState(false);
+
   // New commitment form
   const [newCommitment, setNewCommitment] = useState({
     name: '',
@@ -93,12 +116,88 @@ export default function Settings() {
     }
   }, [activeTab]);
 
+  // Load notification preferences from backend when the tab is opened
+  useEffect(() => {
+    if (activeTab !== 'notifications') return;
+    (async () => {
+      setPushSupported(await isPushSupported());
+      setNotifPermission(await getNotificationPermission());
+      try {
+        const prefs = await pushNotificationService.getPreferences();
+        setNotifPrefs(prefs);
+      } catch { /* keep defaults */ }
+    })();
+  }, [activeTab]);
+
+  const saveNotifPrefs = async (next: NotificationPreferences) => {
+    setSavingNotif(true);
+    try {
+      const saved = await pushNotificationService.updatePreferences(next);
+      setNotifPrefs(saved);
+    } catch (e) {
+      toast.error('Failed to save notification preferences');
+    } finally {
+      setSavingNotif(false);
+    }
+  };
+
+  const updateNotif = (patch: Partial<NotificationPreferences>) => {
+    const next = { ...notifPrefs, ...patch };
+    setNotifPrefs(next);
+    // debounce-light: persist on each change (small payload)
+    saveNotifPrefs(next);
+  };
+
+  const handleEnableNotifications = async () => {
+    if (!pushSupported) {
+      toast.error('Push notifications are not supported in this browser.');
+      return;
+    }
+    const perm = await requestNotificationPermission();
+    setNotifPermission(perm);
+    if (perm === 'granted') {
+      const session = useAuthStore.getState().session;
+      const token = await ensureFcmTokenRegistered(session?.access_token);
+      if (token) {
+        toast.success('Notifications enabled on this device');
+        if (!notifPrefs.enabled) await saveNotifPrefs({ ...notifPrefs, enabled: true });
+      } else {
+        toast.error('Could not register this device. Make sure Firebase is configured on the backend.');
+      }
+    } else if (perm === 'denied') {
+      toast.error('Permission denied. Enable notifications from your browser settings.');
+    }
+  };
+
+  const handleDisableOnDevice = async () => {
+    const session = useAuthStore.getState().session;
+    await unregisterFcmToken(session?.access_token);
+    toast.success('Notifications disabled on this device');
+  };
+
+  const handleSendTest = async () => {
+    setTestingNotif(true);
+    try {
+      const res = await pushNotificationService.sendTest();
+      if (res.success) {
+        toast.success(`Test sent to ${res.delivered_to} device${res.delivered_to === 1 ? '' : 's'}`);
+      } else {
+        toast.error('No devices registered. Click "Enable on this device" first.');
+      }
+    } catch {
+      toast.error('Test failed');
+    } finally {
+      setTestingNotif(false);
+    }
+  };
+
   const tabs = [
     { id: 'profile', label: 'Profile', icon: User },
     { id: 'energy', label: 'Energy', icon: Zap },
     { id: 'sleep', label: 'Sleep', icon: Moon },
     { id: 'commitments', label: 'Commitments', icon: Calendar },
     { id: 'routines', label: 'Routines', icon: Repeat },
+    { id: 'notifications', label: 'Notifications', icon: Bell },
   ];
 
   const energyOptions: { value: EnergyPreference; label: string; description: string }[] = [
@@ -712,6 +811,130 @@ export default function Settings() {
                   No recurring tasks yet. Add one or apply a template above!
                 </p>
               )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'notifications' && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-apple-xl border border-gray-200 p-6 space-y-5">
+              <div>
+                <h2 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
+                  <Bell className="w-5 h-5" /> Push Notifications
+                </h2>
+                <p className="text-sm text-gray-600 mt-1">
+                  Get reminders on this device — works on desktop browsers,
+                  Android, and iOS 16.4+ (after adding Taskly to the Home Screen).
+                </p>
+              </div>
+
+              {/* Device permission */}
+              <div className="rounded-apple border border-gray-200 p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="font-medium text-gray-900">This device</p>
+                    <p className="text-sm text-gray-600 mt-1">
+                      {!pushSupported && 'Push notifications are not supported in this browser.'}
+                      {pushSupported && notifPermission === 'granted' && 'Notifications are enabled on this device.'}
+                      {pushSupported && notifPermission === 'denied' && 'Permission was denied. Enable it from your browser settings.'}
+                      {pushSupported && (notifPermission === 'default' || notifPermission === null) && 'Click below to enable notifications on this device.'}
+                    </p>
+                  </div>
+                  {pushSupported && notifPermission === 'granted' ? (
+                    <Button variant="ghost" onClick={handleDisableOnDevice}>Disable on this device</Button>
+                  ) : (
+                    <Button onClick={handleEnableNotifications} disabled={!pushSupported}>Enable</Button>
+                  )}
+                </div>
+              </div>
+
+              {/* Master toggle */}
+              <div className="flex items-center justify-between rounded-apple border border-gray-200 p-4">
+                <div>
+                  <p className="font-medium text-gray-900">Notifications enabled</p>
+                  <p className="text-sm text-gray-600">Master switch — turn off to mute everything across all devices.</p>
+                </div>
+                <button
+                  onClick={() => updateNotif({ enabled: !notifPrefs.enabled })}
+                  className={clsx(
+                    'relative inline-flex h-6 w-11 items-center rounded-full transition-colors',
+                    notifPrefs.enabled ? 'bg-primary-500' : 'bg-gray-300'
+                  )}
+                  disabled={savingNotif}
+                  aria-label="Toggle notifications"
+                >
+                  <span className={clsx('inline-block h-4 w-4 transform rounded-full bg-white transition-transform', notifPrefs.enabled ? 'translate-x-6' : 'translate-x-1')} />
+                </button>
+              </div>
+
+              {/* Per-type toggles */}
+              <div className={clsx('space-y-2', !notifPrefs.enabled && 'opacity-50 pointer-events-none')}>
+                {[
+                  { key: 'task_reminders', label: 'Task reminders', desc: 'Before each scheduled task starts' },
+                  { key: 'break_reminders', label: 'Break reminders', desc: 'Suggested breaks during long focus' },
+                  { key: 'daily_summary', label: 'Daily summary', desc: 'End-of-day recap of completed tasks' },
+                  { key: 'sleep_warning', label: 'Sleep wind-down', desc: 'Reminder before your bedtime' },
+                  { key: 'reflection_reminder', label: 'Reflection reminder', desc: 'Evening nudge to reflect on the day' },
+                  { key: 'achievement_notifications', label: 'Achievements', desc: 'Streaks and milestones' },
+                ].map(({ key, label, desc }) => (
+                  <div key={key} className="flex items-center justify-between rounded-apple border border-gray-200 p-3">
+                    <div>
+                      <p className="text-sm font-medium text-gray-900">{label}</p>
+                      <p className="text-xs text-gray-500">{desc}</p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={(notifPrefs as any)[key]}
+                      onChange={(e) => updateNotif({ [key]: e.target.checked } as any)}
+                      className="h-4 w-4 rounded border-gray-300 text-primary-500 focus:ring-primary-500"
+                    />
+                  </div>
+                ))}
+              </div>
+
+              {/* Timing */}
+              <div className={clsx('grid grid-cols-1 md:grid-cols-2 gap-4', !notifPrefs.enabled && 'opacity-50 pointer-events-none')}>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Remind me X minutes before a task</label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={240}
+                    value={notifPrefs.reminder_minutes_before}
+                    onChange={(e) => updateNotif({ reminder_minutes_before: Math.max(0, Math.min(240, Number(e.target.value) || 0)) })}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Timezone</label>
+                  <Input value={notifPrefs.timezone} onChange={(e) => updateNotif({ timezone: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Quiet hours start</label>
+                  <Input type="time" value={notifPrefs.quiet_hours_start} onChange={(e) => updateNotif({ quiet_hours_start: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Quiet hours end</label>
+                  <Input type="time" value={notifPrefs.quiet_hours_end} onChange={(e) => updateNotif({ quiet_hours_end: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Daily summary time</label>
+                  <Input type="time" value={notifPrefs.daily_summary_time} onChange={(e) => updateNotif({ daily_summary_time: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Reflection reminder time</label>
+                  <Input type="time" value={notifPrefs.reflection_time} onChange={(e) => updateNotif({ reflection_time: e.target.value })} />
+                </div>
+              </div>
+
+              {/* Test */}
+              <div className="pt-2 border-t border-gray-100">
+                <Button onClick={handleSendTest} disabled={testingNotif || notifPermission !== 'granted'}>
+                  {testingNotif ? 'Sending…' : 'Send test notification'}
+                </Button>
+                <p className="text-xs text-gray-500 mt-2">
+                  Tip: on iPhone, open Taskly in Safari → Share → "Add to Home Screen", then open from the home screen icon to enable push.
+                </p>
+              </div>
             </div>
           </div>
         )}

@@ -1,23 +1,26 @@
 export { supabase, db } from './supabase';
-export { 
-  aiService, 
-  taskService, 
-  planService, 
-  scheduleService, 
+export {
+  aiService,
+  taskService,
+  planService,
+  scheduleService,
   notificationService as backendNotificationService,
   focusSessionService,
   sleepEntryService,
   dailyStatsService,
   recurringTaskService,
   routineTemplateService,
-  default as api 
+  focusSettingsService,
+  sleepGoalService,
+  userPatternsService,
+  default as api
 } from './api';
-export { notificationService } from './notificationService';
 export {
   requestNotificationPermission,
-  onMessageListener,
-  showLocalNotification,
-  scheduleLocalNotification,
-  cancelScheduledNotification,
-  initializeFirebase,
+  getNotificationPermission,
+  ensureFcmTokenRegistered,
+  unregisterFcmToken,
+  onForegroundMessage,
+  onForegroundMessage as onMessageListener,
+  isPushSupported,
 } from './firebase';

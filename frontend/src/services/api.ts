@@ -206,18 +206,44 @@ export const scheduleService = {
 };
 
 // Notification API
+export interface NotificationPreferences {
+  enabled: boolean;
+  task_reminders: boolean;
+  break_reminders: boolean;
+  daily_summary: boolean;
+  sleep_warning: boolean;
+  reflection_reminder: boolean;
+  achievement_notifications: boolean;
+  reminder_minutes_before: number;
+  quiet_hours_start: string;
+  quiet_hours_end: string;
+  timezone: string;
+  daily_summary_time: string;
+  reflection_time: string;
+}
+
 export const notificationService = {
-  async registerToken(token: string) {
-    await api.post('/notifications/register', { token });
+  async registerToken(token: string, deviceHint?: string) {
+    await api.post('/notifications/register', { token, device_hint: deviceHint });
   },
 
-  async getScheduled() {
-    const response = await api.get('/notifications/scheduled');
+  async unregisterToken(token: string) {
+    await api.post('/notifications/unregister', { token });
+  },
+
+  async getPreferences(): Promise<NotificationPreferences> {
+    const response = await api.get<NotificationPreferences>('/notifications/preferences');
     return response.data;
   },
 
-  async cancel(id: string) {
-    await api.delete(`/notifications/${id}`);
+  async updatePreferences(prefs: NotificationPreferences): Promise<NotificationPreferences> {
+    const response = await api.put<NotificationPreferences>('/notifications/preferences', prefs);
+    return response.data;
+  },
+
+  async sendTest(title?: string, body?: string) {
+    const response = await api.post('/notifications/test', { title, body });
+    return response.data as { success: boolean; delivered_to: number };
   },
 };
 
@@ -378,6 +404,90 @@ export const recurringTaskService = {
   async getForDate(date: string) {
     const response = await api.get(`/recurring/for-date/${date}`);
     return response.data;
+  },
+};
+
+// ============================================
+// Focus Settings Service (Pomodoro config)
+// ============================================
+
+export interface FocusSettings {
+  focus_duration: number;
+  short_break_duration: number;
+  long_break_duration: number;
+  sessions_before_long_break: number;
+  auto_start_breaks: boolean;
+  auto_start_focus: boolean;
+  sound_enabled: boolean;
+}
+
+export const focusSettingsService = {
+  async get(): Promise<FocusSettings> {
+    const response = await api.get('/data/focus-settings');
+    return response.data;
+  },
+
+  async save(settings: FocusSettings): Promise<FocusSettings> {
+    const response = await api.put('/data/focus-settings', settings);
+    return response.data;
+  },
+};
+
+// ============================================
+// Sleep Goal Service (tracking targets)
+// ============================================
+
+export interface SleepGoal {
+  target_bedtime: string;
+  target_wake_time: string;
+  target_duration_hours: number;
+}
+
+export const sleepGoalService = {
+  async get(): Promise<SleepGoal> {
+    const response = await api.get('/data/sleep-goal');
+    return response.data;
+  },
+
+  async save(goal: SleepGoal): Promise<SleepGoal> {
+    const response = await api.put('/data/sleep-goal', goal);
+    return response.data;
+  },
+};
+
+// ============================================
+// User Patterns Service (AI learnings)
+// ============================================
+
+export interface UserPattern {
+  id: string;
+  user_id: string;
+  category: string;
+  key: string;
+  value: string;
+  confidence: number;
+  last_used: string;
+  usage_count: number;
+  created_at: string;
+}
+
+export const userPatternsService = {
+  async getAll(): Promise<UserPattern[]> {
+    const response = await api.get('/data/user-patterns');
+    return response.data;
+  },
+
+  async upsert(pattern: { category: string; key: string; value: string; confidence: number }): Promise<UserPattern> {
+    const response = await api.post('/data/user-patterns', pattern);
+    return response.data;
+  },
+
+  async delete(id: string): Promise<void> {
+    await api.delete(`/data/user-patterns/${id}`);
+  },
+
+  async clear(): Promise<void> {
+    await api.delete('/data/user-patterns');
   },
 };
 

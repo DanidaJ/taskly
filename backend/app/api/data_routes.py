@@ -18,6 +18,12 @@ from app.models import (
     SleepBulkSync,
     DailyStatsCreate,
     DailyStatsResponse,
+    FocusSettingsBase,
+    FocusSettingsResponse,
+    SleepGoalBase,
+    SleepGoalResponse,
+    UserPatternUpsert,
+    UserPatternResponse,
 )
 
 router = APIRouter(prefix="/data", tags=["Data Sync"])
@@ -248,3 +254,120 @@ async def save_daily_stats(
 
     result = await db.save_daily_stats(stats_data)
     return result
+
+
+# ============================================
+# Focus Settings (Pomodoro / timer config)
+# ============================================
+
+@router.get("/focus-settings", response_model=FocusSettingsResponse)
+async def get_focus_settings(
+    current_user: dict = Depends(get_current_user),
+):
+    """Get the user's focus timer settings. Returns defaults if not set."""
+    user_id = current_user["user_id"]
+    if db is None:
+        return FocusSettingsResponse(user_id=user_id, **FocusSettingsBase().model_dump())
+    row = await db.get_focus_settings(user_id)
+    if not row:
+        return FocusSettingsResponse(user_id=user_id, **FocusSettingsBase().model_dump())
+    return FocusSettingsResponse(**row)
+
+
+@router.put("/focus-settings", response_model=FocusSettingsResponse)
+async def save_focus_settings(
+    payload: FocusSettingsBase,
+    current_user: dict = Depends(get_current_user),
+):
+    """Save/update the user's focus timer settings."""
+    user_id = current_user["user_id"]
+    if db is None:
+        return FocusSettingsResponse(user_id=user_id, **payload.model_dump())
+    saved = await db.save_focus_settings({"user_id": user_id, **payload.model_dump()})
+    return FocusSettingsResponse(**(saved or {"user_id": user_id, **payload.model_dump()}))
+
+
+# ============================================
+# Sleep Goals (tracking targets)
+# ============================================
+
+@router.get("/sleep-goal", response_model=SleepGoalResponse)
+async def get_sleep_goal(
+    current_user: dict = Depends(get_current_user),
+):
+    """Get the user's sleep tracking goals. Returns defaults if not set."""
+    user_id = current_user["user_id"]
+    if db is None:
+        return SleepGoalResponse(user_id=user_id, **SleepGoalBase().model_dump())
+    row = await db.get_sleep_goal(user_id)
+    if not row:
+        return SleepGoalResponse(user_id=user_id, **SleepGoalBase().model_dump())
+    return SleepGoalResponse(**row)
+
+
+@router.put("/sleep-goal", response_model=SleepGoalResponse)
+async def save_sleep_goal(
+    payload: SleepGoalBase,
+    current_user: dict = Depends(get_current_user),
+):
+    """Save/update the user's sleep tracking goals."""
+    user_id = current_user["user_id"]
+    if db is None:
+        return SleepGoalResponse(user_id=user_id, **payload.model_dump())
+    saved = await db.save_sleep_goal({"user_id": user_id, **payload.model_dump()})
+    return SleepGoalResponse(**(saved or {"user_id": user_id, **payload.model_dump()}))
+
+
+# ============================================
+# User Patterns (AI learnings)
+# ============================================
+
+@router.get("/user-patterns", response_model=list[UserPatternResponse])
+async def list_user_patterns(
+    current_user: dict = Depends(get_current_user),
+):
+    """List all learned patterns for the current user."""
+    if db is None:
+        return []
+    return await db.get_user_patterns(current_user["user_id"])
+
+
+@router.post("/user-patterns", response_model=UserPatternResponse)
+async def upsert_user_pattern(
+    payload: UserPatternUpsert,
+    current_user: dict = Depends(get_current_user),
+):
+    """Upsert a learned pattern. Bumps usage_count + last_used on conflict."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    saved = await db.upsert_user_pattern(
+        user_id=current_user["user_id"],
+        category=payload.category,
+        key=payload.key,
+        value=payload.value,
+        confidence=payload.confidence,
+    )
+    if not saved:
+        raise HTTPException(status_code=500, detail="Failed to save pattern")
+    return saved
+
+
+@router.delete("/user-patterns/{pattern_id}")
+async def delete_user_pattern(
+    pattern_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a single learned pattern."""
+    if db is not None:
+        await db.delete_user_pattern(current_user["user_id"], pattern_id)
+    return {"message": "Pattern deleted"}
+
+
+@router.delete("/user-patterns")
+async def clear_user_patterns(
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete all learned patterns for the current user."""
+    if db is not None:
+        await db.clear_user_patterns(current_user["user_id"])
+    return {"message": "All patterns cleared"}

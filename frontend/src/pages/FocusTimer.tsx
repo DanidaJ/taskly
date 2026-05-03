@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui';
 import { useTaskStore } from '@/stores';
-import { focusSessionService } from '@/services/api';
+import { focusSessionService, focusSettingsService, FocusSettings } from '@/services/api';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
 import { useSearchParams, useNavigate } from 'react-router-dom';
@@ -57,24 +57,42 @@ const DEFAULT_SETTINGS: TimerSettings = {
   soundEnabled: true,
 };
 
+const settingsToBackend = (s: TimerSettings): FocusSettings => ({
+  focus_duration: s.focusDuration,
+  short_break_duration: s.shortBreakDuration,
+  long_break_duration: s.longBreakDuration,
+  sessions_before_long_break: s.sessionsBeforeLongBreak,
+  auto_start_breaks: s.autoStartBreaks,
+  auto_start_focus: s.autoStartFocus,
+  sound_enabled: s.soundEnabled,
+});
+
+const settingsFromBackend = (s: FocusSettings): TimerSettings => ({
+  focusDuration: s.focus_duration,
+  shortBreakDuration: s.short_break_duration,
+  longBreakDuration: s.long_break_duration,
+  sessionsBeforeLongBreak: s.sessions_before_long_break,
+  autoStartBreaks: s.auto_start_breaks,
+  autoStartFocus: s.auto_start_focus,
+  soundEnabled: s.sound_enabled,
+});
+
 export default function FocusTimer() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  
-  const [settings, setSettings] = useState<TimerSettings>(() => {
-    const saved = localStorage.getItem('planiq-focus-settings');
-    return saved ? JSON.parse(saved) : DEFAULT_SETTINGS;
-  });
+
+  const [settings, setSettings] = useState<TimerSettings>(DEFAULT_SETTINGS);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
 
   const [mode, setMode] = useState<TimerMode>('focus');
-  const [timeLeft, setTimeLeft] = useState(settings.focusDuration * 60);
+  const [timeLeft, setTimeLeft] = useState(DEFAULT_SETTINGS.focusDuration * 60);
   const [isRunning, setIsRunning] = useState(false);
   const [sessionsCompleted, setSessionsCompleted] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [todaySessions, setTodaySessions] = useState<FocusSession[]>([]);
 
-  const { plannedTasks, tasks } = useTaskStore();
+  const { plannedTasks } = useTaskStore();
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -86,69 +104,54 @@ export default function FocusTimer() {
     }
   }, [searchParams]);
 
-  // Load today's sessions: try backend first, fall back to localStorage
+  // Load settings from backend
   useEffect(() => {
-    const todayKey = new Date().toDateString();
+    focusSettingsService.get()
+      .then((remote) => {
+        const mapped = settingsFromBackend(remote);
+        setSettings(mapped);
+        // Only refresh timeLeft for the focus mode if the timer hasn't started.
+        setTimeLeft((prev) => (isRunning ? prev : mapped.focusDuration * 60));
+      })
+      .catch((error) => {
+        console.error('Failed to load focus settings:', error);
+      })
+      .finally(() => setSettingsLoaded(true));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Load today's sessions from backend (single source of truth)
+  useEffect(() => {
     const todayDate = format(new Date(), 'yyyy-MM-dd');
-    
+
     focusSessionService.getForDate(todayDate)
       .then((backendSessions: any[]) => {
-        if (backendSessions && backendSessions.length > 0) {
-          // Map backend format to frontend format
-          const mapped = backendSessions.map((s: any) => ({
-            id: s.id,
-            taskId: s.task_id || undefined,
-            taskName: s.task_name || undefined,
-            startTime: new Date(s.start_time),
-            endTime: s.end_time ? new Date(s.end_time) : undefined,
-            duration: s.duration,
-            mode: s.mode as TimerMode,
-            completed: s.completed,
-          }));
-          setTodaySessions(mapped);
-          // Update localStorage cache too
-          localStorage.setItem(`planiq-focus-sessions-${todayKey}`, JSON.stringify(mapped));
-        } else {
-          // Fall back to localStorage
-          const saved = localStorage.getItem(`planiq-focus-sessions-${todayKey}`);
-          if (saved) setTodaySessions(JSON.parse(saved));
-        }
+        const mapped = (backendSessions || []).map((s: any) => ({
+          id: s.id,
+          taskId: s.task_id || undefined,
+          taskName: s.task_name || undefined,
+          startTime: new Date(s.start_time),
+          endTime: s.end_time ? new Date(s.end_time) : undefined,
+          duration: s.duration,
+          mode: s.mode as TimerMode,
+          completed: s.completed,
+        }));
+        setTodaySessions(mapped);
+        const focusDone = mapped.filter((s) => s.mode === 'focus' && s.completed).length;
+        setSessionsCompleted(focusDone);
       })
-      .catch(() => {
-        // Offline/error: use localStorage
-        const saved = localStorage.getItem(`planiq-focus-sessions-${todayKey}`);
-        if (saved) setTodaySessions(JSON.parse(saved));
+      .catch((error) => {
+        console.error('Failed to load focus sessions:', error);
       });
   }, []);
 
-  // Save settings to localStorage
+  // Persist settings to backend whenever they change (after initial load).
   useEffect(() => {
-    localStorage.setItem('planiq-focus-settings', JSON.stringify(settings));
-  }, [settings]);
-
-  // Save sessions to localStorage + sync to backend
-  useEffect(() => {
-    const todayKey = new Date().toDateString();
-    const todayDate = format(new Date(), 'yyyy-MM-dd');
-    localStorage.setItem(`planiq-focus-sessions-${todayKey}`, JSON.stringify(todaySessions));
-    
-    // Sync to backend (debounced via the effect itself)
-    if (todaySessions.length > 0) {
-      const backendSessions = todaySessions.map((s) => ({
-        task_id: s.taskId || null,
-        task_name: s.taskName || null,
-        start_time: new Date(s.startTime).toISOString(),
-        end_time: s.endTime ? new Date(s.endTime).toISOString() : null,
-        duration: s.duration,
-        mode: s.mode,
-        completed: s.completed,
-        session_date: todayDate,
-      }));
-      focusSessionService.syncForDate(todayDate, backendSessions).catch(() => {
-        // Silent fail — localStorage is already saved as fallback
-      });
-    }
-  }, [todaySessions]);
+    if (!settingsLoaded) return;
+    focusSettingsService.save(settingsToBackend(settings)).catch((error) => {
+      console.error('Failed to save focus settings:', error);
+    });
+  }, [settings, settingsLoaded]);
 
   // Timer logic
   useEffect(() => {
@@ -177,20 +180,45 @@ export default function FocusTimer() {
 
     // Record session
     if (mode === 'focus') {
-      const session: FocusSession = {
-        id: Date.now().toString(),
+      const startTime = new Date(Date.now() - settings.focusDuration * 60 * 1000);
+      const endTime = new Date();
+      const taskName = selectedTaskId
+        ? plannedTasks.find(t => t.id === selectedTaskId)?.task_name
+        : undefined;
+      const tempId = `tmp-${Date.now()}`;
+      const optimistic: FocusSession = {
+        id: tempId,
         taskId: selectedTaskId || undefined,
-        taskName: selectedTaskId 
-          ? plannedTasks.find(t => t.id === selectedTaskId)?.task_name 
-          : undefined,
-        startTime: new Date(Date.now() - settings.focusDuration * 60 * 1000),
-        endTime: new Date(),
+        taskName,
+        startTime,
+        endTime,
         duration: settings.focusDuration * 60,
         mode: 'focus',
         completed: true,
       };
-      setTodaySessions(prev => [...prev, session]);
+      setTodaySessions(prev => [...prev, optimistic]);
       setSessionsCompleted(prev => prev + 1);
+
+      // Persist to backend; replace temp id with the real one once saved.
+      focusSessionService.save({
+        task_id: selectedTaskId || null,
+        task_name: taskName || null,
+        start_time: startTime.toISOString(),
+        end_time: endTime.toISOString(),
+        duration: settings.focusDuration * 60,
+        mode: 'focus',
+        completed: true,
+        session_date: format(new Date(), 'yyyy-MM-dd'),
+      })
+        .then((saved: any) => {
+          setTodaySessions(prev => prev.map(s => (s.id === tempId ? { ...s, id: saved.id } : s)));
+        })
+        .catch((error) => {
+          console.error('Failed to save focus session:', error);
+          toast.error('Failed to save your session. Please try again.');
+          setTodaySessions(prev => prev.filter(s => s.id !== tempId));
+          setSessionsCompleted(prev => Math.max(0, prev - 1));
+        });
       
       toast.success(`🎉 Focus session complete! ${sessionsCompleted + 1} sessions today.`);
 

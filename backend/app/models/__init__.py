@@ -76,6 +76,15 @@ from .schemas import (
     RoutineTemplateCreate,
     RoutineTemplateUpdate,
     RoutineTemplateResponse,
+
+    # User settings models
+    FocusSettingsBase,
+    FocusSettingsResponse,
+    SleepGoalBase,
+    SleepGoalResponse,
+    UserPatternBase,
+    UserPatternUpsert,
+    UserPatternResponse,
 )
 
 __all__ = [
@@ -131,4 +140,11 @@ __all__ = [
     "RoutineTemplateCreate",
     "RoutineTemplateUpdate",
     "RoutineTemplateResponse",
+    "FocusSettingsBase",
+    "FocusSettingsResponse",
+    "SleepGoalBase",
+    "SleepGoalResponse",
+    "UserPatternBase",
+    "UserPatternUpsert",
+    "UserPatternResponse",
 ]

@@ -3,7 +3,9 @@ from firebase_admin import credentials, messaging
 from typing import Optional
 import structlog
 import os
+from urllib.parse import urlparse
 from app.core.config import settings
+from app.core.database import db
 
 logger = structlog.get_logger()
 
@@ -156,6 +158,133 @@ class NotificationService:
         except Exception as e:
             logger.error("Failed to unsubscribe from topic", error=str(e))
             return False
+
+    # ------------------------------------------------------------------
+    # User-aware fan-out (uses DB to look up tokens + preferences)
+    # ------------------------------------------------------------------
+    PREF_KEY_BY_TYPE = {
+        "task_reminder": "task_reminders",
+        "break_reminder": "break_reminders",
+        "daily_summary": "daily_summary",
+        "sleep_warning": "sleep_warning",
+        "reflection_reminder": "reflection_reminder",
+        "achievement": "achievement_notifications",
+        "test": None,  # always allowed if master enabled
+    }
+
+    @staticmethod
+    def _is_in_quiet_hours(now_hhmm: str, start: str, end: str) -> bool:
+        try:
+            def to_min(s: str) -> int:
+                h, m = s.split(":")
+                return int(h) * 60 + int(m)
+            n, s, e = to_min(now_hhmm), to_min(start), to_min(end)
+            return (n >= s or n < e) if s > e else (s <= n < e)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _get_https_link(data: Optional[dict]) -> Optional[str]:
+        """Return a valid HTTPS link for FCM webpush options, otherwise None.
+
+        Firebase requires `WebpushFCMOptions.link` to be an absolute HTTPS URL.
+        Relative paths like `/app` or HTTP localhost URLs will be rejected.
+        """
+        raw = (data or {}).get("url")
+        if not raw:
+            return None
+        try:
+            parsed = urlparse(str(raw))
+            if parsed.scheme == "https" and parsed.netloc:
+                return str(raw)
+        except Exception:
+            return None
+        return None
+
+    async def send_to_user(
+        self,
+        user_id: str,
+        title: str,
+        body: str,
+        notif_type: str = "test",
+        data: Optional[dict] = None,
+        respect_quiet_hours: bool = True,
+        dedupe_key: Optional[str] = None,
+    ) -> int:
+        """Fan out a notification to all of a user's registered devices.
+
+        Returns the count of successful sends. Honors per-user preferences,
+        per-type opt-outs, quiet hours, and idempotency via dedupe_key.
+        Removes dead tokens automatically.
+        """
+        if not _firebase_initialized or db is None:
+            return 0
+
+        # Idempotency check
+        if dedupe_key and await db.has_sent_notification(user_id, dedupe_key):
+            logger.debug("Skipping already-sent notification", user_id=user_id, dedupe_key=dedupe_key)
+            return 0
+
+        prefs = await db.get_notification_preferences(user_id) or {}
+        if not prefs.get("enabled", True):
+            return 0
+        pref_key = self.PREF_KEY_BY_TYPE.get(notif_type)
+        if pref_key and not prefs.get(pref_key, True):
+            return 0
+
+        if respect_quiet_hours and notif_type != "test":
+            try:
+                from datetime import datetime
+                import pytz
+                tz = pytz.timezone(prefs.get("timezone") or settings.notifications_default_timezone)
+                now_hhmm = datetime.now(tz).strftime("%H:%M")
+                if self._is_in_quiet_hours(
+                    now_hhmm,
+                    prefs.get("quiet_hours_start", "22:00"),
+                    prefs.get("quiet_hours_end", "08:00"),
+                ):
+                    logger.debug("Suppressed by quiet hours", user_id=user_id)
+                    return 0
+            except Exception as e:
+                logger.warning("Quiet hours check failed", error=str(e))
+
+        tokens = await db.get_fcm_tokens_for_user(user_id)
+        if not tokens:
+            return 0
+
+        sent = 0
+        for token in tokens:
+            try:
+                https_link = self._get_https_link(data)
+                webpush_config = messaging.WebpushConfig(
+                    notification=messaging.WebpushNotification(
+                        title=title,
+                        body=body,
+                        icon="/icons/icon-192x192.png",
+                        badge="/icons/icon-72x72.png",
+                        tag=notif_type,
+                    ),
+                    fcm_options=messaging.WebpushFCMOptions(link=https_link) if https_link else None,
+                )
+
+                msg = messaging.Message(
+                    notification=messaging.Notification(title=title, body=body),
+                    data={k: str(v) for k, v in (data or {}).items()},
+                    token=token,
+                    webpush=webpush_config,
+                )
+                messaging.send(msg)
+                sent += 1
+            except messaging.UnregisteredError:
+                # Token is dead — remove it
+                await db.delete_fcm_token(token)
+                logger.info("Removed unregistered FCM token", token=token[:20])
+            except Exception as e:
+                logger.warning("Failed to send to token", error=str(e), token=token[:20])
+
+        if sent and dedupe_key:
+            await db.record_sent_notification(user_id, dedupe_key, notif_type)
+        return sent
 
 
 # Singleton instance

@@ -38,52 +38,59 @@ export default function Dashboard() {
   const [dailyInsight, setDailyInsight] = useState('');
 
   useEffect(() => {
-    const todayKey = new Date().toDateString();
     const todayDate = format(new Date(), 'yyyy-MM-dd');
+    const yesterday = format(subDays(new Date(), 1), 'yyyy-MM-dd');
+    const STREAK_LOOKBACK_DAYS = 90;
+    const streakStart = format(subDays(new Date(), STREAK_LOOKBACK_DAYS - 1), 'yyyy-MM-dd');
 
-    // Load focus sessions: backend first, localStorage fallback
+    // Today's focus minutes
     focusSessionService.getForDate(todayDate)
       .then((sessions: any[]) => {
-        if (sessions && sessions.length > 0) {
-          const total = sessions
-            .filter((s: any) => s.mode === 'focus' && s.completed)
-            .reduce((acc: number, s: any) => acc + s.duration / 60, 0);
-          setFocusMinutes(Math.round(total));
-        } else {
-          loadFocusFromLocal(todayKey);
-        }
+        const total = (sessions || [])
+          .filter((s: any) => s.mode === 'focus' && s.completed)
+          .reduce((acc: number, s: any) => acc + s.duration / 60, 0);
+        setFocusMinutes(Math.round(total));
       })
-      .catch(() => loadFocusFromLocal(todayKey));
+      .catch((error) => {
+        console.error('Failed to load focus sessions:', error);
+      });
 
-    // Load sleep entries: backend first, localStorage fallback
-    const yesterday = format(subDays(new Date(), 1), 'yyyy-MM-dd');
+    // Last night's sleep
     sleepEntryService.getAll(7)
       .then((entries: any[]) => {
-        if (entries && entries.length > 0) {
-          const lastSleep = entries.find((e: any) => e.date === yesterday || e.date === todayDate);
-          if (lastSleep) {
-            setLastNightSleep({ duration: lastSleep.duration, quality: lastSleep.quality });
-          }
-        } else {
-          loadSleepFromLocal(yesterday, todayDate);
+        const lastSleep = (entries || []).find((e: any) => e.date === yesterday || e.date === todayDate);
+        if (lastSleep) {
+          setLastNightSleep({ duration: lastSleep.duration, quality: lastSleep.quality });
         }
       })
-      .catch(() => loadSleepFromLocal(yesterday, todayDate));
+      .catch((error) => {
+        console.error('Failed to load sleep entries:', error);
+      });
 
-    // Calculate streak from localStorage (historical data)
-    let currentStreak = 0;
-    for (let i = 0; i < 365; i++) {
-      const date = new Date();
-      date.setDate(date.getDate() - i);
-      const dateStr = date.toDateString();
-      const hasData = localStorage.getItem(`planiq-focus-sessions-${dateStr}`);
-      if (hasData && JSON.parse(hasData).length > 0) {
-        currentStreak++;
-      } else if (i > 0) {
-        break;
-      }
-    }
-    setStreak(currentStreak);
+    // Streak: count consecutive days (back from today) with at least one
+    // completed focus session. Pulled from the backend in one range query.
+    focusSessionService.getForDateRange(streakStart, todayDate)
+      .then((sessions: any[]) => {
+        const daysWithFocus = new Set<string>();
+        (sessions || []).forEach((s: any) => {
+          if (s.mode === 'focus' && s.completed && s.session_date) {
+            daysWithFocus.add(s.session_date);
+          }
+        });
+        let count = 0;
+        for (let i = 0; i < STREAK_LOOKBACK_DAYS; i++) {
+          const dateStr = format(subDays(new Date(), i), 'yyyy-MM-dd');
+          if (daysWithFocus.has(dateStr)) {
+            count++;
+          } else if (i > 0) {
+            break;
+          }
+        }
+        setStreak(count);
+      })
+      .catch((error) => {
+        console.error('Failed to compute streak:', error);
+      });
 
     // Set greeting based on time of day
     const hour = new Date().getHours();
@@ -94,28 +101,6 @@ export default function Dashboard() {
     // Generate daily insight based on data
     generateDailyInsight();
   }, []);
-
-  const loadFocusFromLocal = (todayKey: string) => {
-    const sessions = localStorage.getItem(`planiq-focus-sessions-${todayKey}`);
-    if (sessions) {
-      const parsed = JSON.parse(sessions);
-      const total = parsed
-        .filter((s: any) => s.mode === 'focus' && s.completed)
-        .reduce((acc: number, s: any) => acc + s.duration / 60, 0);
-      setFocusMinutes(Math.round(total));
-    }
-  };
-
-  const loadSleepFromLocal = (yesterday: string, todayDate: string) => {
-    const sleepEntries = localStorage.getItem('planiq-sleep-entries');
-    if (sleepEntries) {
-      const entries = JSON.parse(sleepEntries);
-      const lastSleep = entries.find((e: any) => e.date === yesterday || e.date === todayDate);
-      if (lastSleep) {
-        setLastNightSleep({ duration: lastSleep.duration, quality: lastSleep.quality });
-      }
-    }
-  };
 
   const generateDailyInsight = () => {
     // Prioritized insights based on importance (not random)

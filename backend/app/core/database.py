@@ -294,6 +294,134 @@ class SupabaseDB:
         response = self.client.table('routine_templates').delete().eq('id', template_id).execute()
         return response.data
 
+    # ------------------------------------------------------------------
+    # Notifications
+    # ------------------------------------------------------------------
+    async def upsert_fcm_token(self, user_id: str, token: str, device_hint: str | None = None, user_agent: str | None = None):
+        """Insert or update an FCM token. Token is unique globally; if the
+        same token exists for another user (device handed off), reassign it."""
+        from datetime import datetime
+        payload = {
+            "user_id": user_id,
+            "token": token,
+            "device_hint": device_hint,
+            "user_agent": user_agent,
+            "last_seen_at": datetime.utcnow().isoformat(),
+        }
+        response = self.client.table('user_fcm_tokens').upsert(
+            payload, on_conflict='token'
+        ).execute()
+        return response.data[0] if response.data else None
+
+    async def delete_fcm_token(self, token: str):
+        response = self.client.table('user_fcm_tokens').delete().eq('token', token).execute()
+        return response.data
+
+    async def get_fcm_tokens_for_user(self, user_id: str) -> list[str]:
+        response = self.client.table('user_fcm_tokens').select('token').eq('user_id', user_id).execute()
+        return [row['token'] for row in (response.data or [])]
+
+    async def get_all_users_with_tokens(self) -> list[str]:
+        """Return distinct user_ids that have at least one FCM token registered."""
+        response = self.client.table('user_fcm_tokens').select('user_id').execute()
+        return list({row['user_id'] for row in (response.data or [])})
+
+    async def get_notification_preferences(self, user_id: str) -> dict | None:
+        response = self.client.table('notification_preferences').select('*').eq('user_id', user_id).execute()
+        return response.data[0] if response.data else None
+
+    async def save_notification_preferences(self, prefs: dict) -> dict | None:
+        from datetime import datetime
+        prefs = {**prefs, "updated_at": datetime.utcnow().isoformat()}
+        response = self.client.table('notification_preferences').upsert(prefs, on_conflict='user_id').execute()
+        return response.data[0] if response.data else None
+
+    async def has_sent_notification(self, user_id: str, dedupe_key: str) -> bool:
+        response = self.client.table('notification_log').select('id').eq('user_id', user_id).eq('dedupe_key', dedupe_key).execute()
+        return bool(response.data)
+
+    async def record_sent_notification(self, user_id: str, dedupe_key: str, notif_type: str):
+        try:
+            self.client.table('notification_log').insert({
+                'user_id': user_id,
+                'dedupe_key': dedupe_key,
+                'notif_type': notif_type,
+            }).execute()
+        except Exception:
+            # Likely unique violation — already sent. Safe to ignore.
+            pass
+
+    # ------------------------------------------------------------------
+    # Focus Settings
+    # ------------------------------------------------------------------
+    async def get_focus_settings(self, user_id: str) -> dict | None:
+        response = self.client.table('focus_settings').select('*').eq('user_id', user_id).execute()
+        return response.data[0] if response.data else None
+
+    async def save_focus_settings(self, settings_data: dict) -> dict | None:
+        from datetime import datetime
+        settings_data = {**settings_data, "updated_at": datetime.utcnow().isoformat()}
+        response = self.client.table('focus_settings').upsert(
+            settings_data, on_conflict='user_id'
+        ).execute()
+        return response.data[0] if response.data else None
+
+    # ------------------------------------------------------------------
+    # Sleep Goals
+    # ------------------------------------------------------------------
+    async def get_sleep_goal(self, user_id: str) -> dict | None:
+        response = self.client.table('sleep_goals').select('*').eq('user_id', user_id).execute()
+        return response.data[0] if response.data else None
+
+    async def save_sleep_goal(self, goal_data: dict) -> dict | None:
+        from datetime import datetime
+        goal_data = {**goal_data, "updated_at": datetime.utcnow().isoformat()}
+        response = self.client.table('sleep_goals').upsert(
+            goal_data, on_conflict='user_id'
+        ).execute()
+        return response.data[0] if response.data else None
+
+    # ------------------------------------------------------------------
+    # User Patterns
+    # ------------------------------------------------------------------
+    async def get_user_patterns(self, user_id: str) -> list:
+        response = self.client.table('user_patterns').select('*').eq('user_id', user_id).order('last_used', desc=True).execute()
+        return response.data or []
+
+    async def upsert_user_pattern(self, user_id: str, category: str, key: str, value: str, confidence: float) -> dict | None:
+        """Insert or update a pattern. On conflict (same user/category/key)
+        bumps usage_count, refreshes last_used and overwrites value+confidence."""
+        from datetime import datetime
+        existing = self.client.table('user_patterns').select('*').eq('user_id', user_id).eq('category', category).eq('key', key).execute()
+        now_iso = datetime.utcnow().isoformat()
+        if existing.data:
+            row = existing.data[0]
+            updated = self.client.table('user_patterns').update({
+                'value': value,
+                'confidence': confidence,
+                'usage_count': (row.get('usage_count') or 0) + 1,
+                'last_used': now_iso,
+            }).eq('id', row['id']).execute()
+            return updated.data[0] if updated.data else None
+        inserted = self.client.table('user_patterns').insert({
+            'user_id': user_id,
+            'category': category,
+            'key': key,
+            'value': value,
+            'confidence': confidence,
+            'last_used': now_iso,
+            'usage_count': 1,
+        }).execute()
+        return inserted.data[0] if inserted.data else None
+
+    async def delete_user_pattern(self, user_id: str, pattern_id: str):
+        response = self.client.table('user_patterns').delete().eq('id', pattern_id).eq('user_id', user_id).execute()
+        return response.data
+
+    async def clear_user_patterns(self, user_id: str):
+        response = self.client.table('user_patterns').delete().eq('user_id', user_id).execute()
+        return response.data
+
 
 # Singleton instance - only create if initialization succeeds
 def _create_db_instance():

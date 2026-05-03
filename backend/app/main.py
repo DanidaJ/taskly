@@ -46,7 +46,24 @@ logger = structlog.get_logger()
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
     logger.info("Starting Taskly API", version=settings.APP_VERSION)
+    stop_scheduler = None
+    try:
+        from app.services.notification_service import initialize_firebase
+        from app.services.notification_scheduler import (
+            start_scheduler,
+            stop_scheduler as _stop,
+        )
+        initialize_firebase()
+        start_scheduler()
+        stop_scheduler = _stop
+    except Exception as e:
+        logger.warning("notification scheduler startup failed", error=str(e))
     yield
+    if stop_scheduler:
+        try:
+            stop_scheduler()
+        except Exception:
+            pass
     logger.info("Shutting down Taskly API")
 
 

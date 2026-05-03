@@ -84,67 +84,36 @@ export default function PlannerChat() {
     return () => clearInterval(timer);
   }, []);
 
-  // Load connected data (sleep, focus) for smarter planning
+  // Load connected data (sleep, focus) for smarter planning (backend only)
   useEffect(() => {
     const yesterday = format(subDays(new Date(), 1), 'yyyy-MM-dd');
-
-    // Sleep: backend first, localStorage fallback
-    sleepEntryService.getAll(7)
-      .then((entries: any[]) => {
-        if (entries && entries.length > 0) {
-          const lastSleep = entries.find((e: any) => e.date === yesterday || e.date === targetDate);
-          if (lastSleep) {
-            setSleepContext({ quality: lastSleep.quality, duration: lastSleep.duration });
-          }
-        } else {
-          loadSleepLocal(yesterday);
-        }
-      })
-      .catch(() => loadSleepLocal(yesterday));
-
-    // Focus: backend first, localStorage fallback
     const weekAgo = format(subDays(new Date(), 7), 'yyyy-MM-dd');
     const todayStr = format(new Date(), 'yyyy-MM-dd');
-    focusSessionService.getForDateRange(weekAgo, todayStr)
-      .then((sessions: any[]) => {
-        if (sessions && sessions.length > 0) {
-          const total = sessions
-            .filter((s: any) => s.mode === 'focus' && s.completed)
-            .reduce((acc: number, s: any) => acc + s.duration / 60, 0);
-          setTodayFocusMinutes(Math.round(total / 7));
-        } else {
-          loadFocusLocal();
+
+    sleepEntryService.getAll(7)
+      .then((entries: any[]) => {
+        const lastSleep = (entries || []).find(
+          (e: any) => e.date === yesterday || e.date === targetDate
+        );
+        if (lastSleep) {
+          setSleepContext({ quality: lastSleep.quality, duration: lastSleep.duration });
         }
       })
-      .catch(() => loadFocusLocal());
-  }, [targetDate]);
+      .catch((error) => {
+        console.error('Failed to load sleep entries:', error);
+      });
 
-  const loadSleepLocal = (yesterday: string) => {
-    const sleepEntries = localStorage.getItem('planiq-sleep-entries');
-    if (sleepEntries) {
-      const entries = JSON.parse(sleepEntries);
-      const lastSleep = entries.find((e: any) => e.date === yesterday || e.date === targetDate);
-      if (lastSleep) {
-        setSleepContext({ quality: lastSleep.quality, duration: lastSleep.duration });
-      }
-    }
-  };
-
-  const loadFocusLocal = () => {
-    let totalFocusWeek = 0;
-    for (let i = 0; i < 7; i++) {
-      const date = new Date();
-      date.setDate(date.getDate() - i);
-      const sessions = localStorage.getItem(`planiq-focus-sessions-${date.toDateString()}`);
-      if (sessions) {
-        const parsed = JSON.parse(sessions);
-        totalFocusWeek += parsed
+    focusSessionService.getForDateRange(weekAgo, todayStr)
+      .then((sessions: any[]) => {
+        const total = (sessions || [])
           .filter((s: any) => s.mode === 'focus' && s.completed)
           .reduce((acc: number, s: any) => acc + s.duration / 60, 0);
-      }
-    }
-    setTodayFocusMinutes(Math.round(totalFocusWeek / 7));
-  };
+        setTodayFocusMinutes(Math.round(total / 7));
+      })
+      .catch((error) => {
+        console.error('Failed to load focus sessions:', error);
+      });
+  }, [targetDate]);
 
   // Scroll to bottom when new messages arrive
   useEffect(() => {

@@ -17,7 +17,7 @@ import {
   BarChart3,
 } from 'lucide-react';
 import { Button } from '@/components/ui';
-import { sleepEntryService } from '@/services/api';
+import { sleepEntryService, sleepGoalService, SleepGoal as SleepGoalDTO } from '@/services/api';
 import { format, parseISO, startOfWeek, endOfWeek, eachDayOfInterval, subDays, addDays, isSameDay } from 'date-fns';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
@@ -64,44 +64,53 @@ export default function SleepTracker() {
     notes: '',
   });
 
-  // Load data: try backend first, fall back to localStorage
+  const [goalLoaded, setGoalLoaded] = useState(false);
+
+  // Load entries + goal from backend (single source of truth)
   useEffect(() => {
-    const savedGoal = localStorage.getItem('planiq-sleep-goal');
-    if (savedGoal) setGoal(JSON.parse(savedGoal));
+    sleepGoalService.get()
+      .then((g) => {
+        setGoal({
+          targetBedtime: g.target_bedtime,
+          targetWakeTime: g.target_wake_time,
+          targetDuration: g.target_duration_hours,
+        });
+      })
+      .catch((error) => {
+        console.error('Failed to load sleep goal:', error);
+      })
+      .finally(() => setGoalLoaded(true));
 
     sleepEntryService.getAll()
       .then((backendEntries: any[]) => {
-        if (backendEntries && backendEntries.length > 0) {
-          const mapped: SleepEntry[] = backendEntries.map((e: any) => ({
-            id: e.id,
-            date: e.date,
-            bedtime: e.bedtime,
-            wakeTime: e.wake_time,
-            quality: e.quality,
-            notes: e.notes || undefined,
-            duration: e.duration,
-          }));
-          setEntries(mapped);
-          localStorage.setItem('planiq-sleep-entries', JSON.stringify(mapped));
-        } else {
-          const savedEntries = localStorage.getItem('planiq-sleep-entries');
-          if (savedEntries) setEntries(JSON.parse(savedEntries));
-        }
+        const mapped: SleepEntry[] = (backendEntries || []).map((e: any) => ({
+          id: e.id,
+          date: e.date,
+          bedtime: e.bedtime,
+          wakeTime: e.wake_time,
+          quality: e.quality,
+          notes: e.notes || undefined,
+          duration: e.duration,
+        }));
+        setEntries(mapped);
       })
-      .catch(() => {
-        const savedEntries = localStorage.getItem('planiq-sleep-entries');
-        if (savedEntries) setEntries(JSON.parse(savedEntries));
+      .catch((error) => {
+        console.error('Failed to load sleep entries:', error);
       });
   }, []);
 
-  // Save entries to localStorage (cache)
+  // Persist goal changes to backend
   useEffect(() => {
-    localStorage.setItem('planiq-sleep-entries', JSON.stringify(entries));
-  }, [entries]);
-
-  useEffect(() => {
-    localStorage.setItem('planiq-sleep-goal', JSON.stringify(goal));
-  }, [goal]);
+    if (!goalLoaded) return;
+    const payload: SleepGoalDTO = {
+      target_bedtime: goal.targetBedtime,
+      target_wake_time: goal.targetWakeTime,
+      target_duration_hours: goal.targetDuration,
+    };
+    sleepGoalService.save(payload).catch((error) => {
+      console.error('Failed to save sleep goal:', error);
+    });
+  }, [goal, goalLoaded]);
 
   const calculateDuration = (bedtime: string, wakeTime: string): number => {
     const [bedHour, bedMin] = bedtime.split(':').map(Number);
@@ -113,46 +122,47 @@ export default function SleepTracker() {
     return duration;
   };
 
-  const handleAddEntry = () => {
+  const handleAddEntry = async () => {
     const duration = calculateDuration(newEntry.bedtime, newEntry.wakeTime);
-    
-    const entry: SleepEntry = {
-      id: Date.now().toString(),
-      date: newEntry.date,
-      bedtime: newEntry.bedtime,
-      wakeTime: newEntry.wakeTime,
-      quality: newEntry.quality,
-      notes: newEntry.notes || undefined,
-      duration,
-    };
 
-    // Remove existing entry for the same date
-    setEntries(prev => [
-      ...prev.filter(e => e.date !== newEntry.date),
-      entry,
-    ]);
+    try {
+      const saved: any = await sleepEntryService.save({
+        date: newEntry.date,
+        bedtime: newEntry.bedtime,
+        wake_time: newEntry.wakeTime,
+        quality: newEntry.quality,
+        notes: newEntry.notes || null,
+        duration,
+      });
 
-    // Sync to backend
-    sleepEntryService.save({
-      date: entry.date,
-      bedtime: entry.bedtime,
-      wake_time: entry.wakeTime,
-      quality: entry.quality,
-      notes: entry.notes || null,
-      duration: entry.duration,
-    }).catch(() => { /* silent fail — localStorage is the cache */ });
+      const entry: SleepEntry = {
+        id: saved.id,
+        date: saved.date,
+        bedtime: saved.bedtime,
+        wakeTime: saved.wake_time,
+        quality: saved.quality,
+        notes: saved.notes || undefined,
+        duration: saved.duration,
+      };
 
-    setShowAddEntry(false);
-    toast.success('Sleep entry logged!');
-    
-    // Reset form
-    setNewEntry({
-      date: format(new Date(), 'yyyy-MM-dd'),
-      bedtime: '22:30',
-      wakeTime: '06:30',
-      quality: 4,
-      notes: '',
-    });
+      setEntries(prev => [
+        ...prev.filter(e => e.date !== entry.date),
+        entry,
+      ]);
+
+      setShowAddEntry(false);
+      toast.success('Sleep entry logged!');
+      setNewEntry({
+        date: format(new Date(), 'yyyy-MM-dd'),
+        bedtime: '22:30',
+        wakeTime: '06:30',
+        quality: 4,
+        notes: '',
+      });
+    } catch (error) {
+      console.error('Failed to save sleep entry:', error);
+      toast.error('Failed to log sleep entry. Please try again.');
+    }
   };
 
   const getWeekDays = () => {

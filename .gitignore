@@ -84,3 +84,5 @@ docker-compose.override.yml
 .cache/
 *.sqlite3
 *.db
+firebase-credentials.json
+

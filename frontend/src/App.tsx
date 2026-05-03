@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/authStore';
 import { useUserProfileStore } from '@/stores/userProfileStore';
+import { useUserPatternsStore } from '@/stores/userPatternsStore';
 import Layout from '@/components/Layout';
 import Dashboard from '@/pages/Dashboard';
 import Tasks from '@/pages/Tasks';
@@ -13,7 +14,12 @@ import FocusTimer from '@/pages/FocusTimer';
 import SleepTracker from '@/pages/SleepTracker';
 import Analytics from '@/pages/Analytics';
 import { Home, Features, HowItWorks, About } from '@/pages/landing';
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
+import toast from 'react-hot-toast';
+import {
+  ensureFcmTokenRegistered,
+  onForegroundMessage,
+} from '@/services/firebase';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading, user } = useAuthStore();
@@ -38,34 +44,48 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 function App() {
   const { initialize, isAuthenticated, user } = useAuthStore();
   const { loadAllProfile } = useUserProfileStore();
-  const [isHydrated, setIsHydrated] = useState(false);
+  const { loadPatterns, reset: resetPatterns } = useUserPatternsStore();
 
   useEffect(() => {
-    // Wait for Zustand to hydrate from localStorage
-    const timer = setTimeout(() => {
-      setIsHydrated(true);
-    }, 0);
+    initialize();
+  }, [initialize]);
 
-    return () => clearTimeout(timer);
-  }, []);
-
-  useEffect(() => {
-    if (isHydrated) {
-      initialize();
-    }
-  }, [isHydrated, initialize]);
-
-  // Load complete user profile when authenticated (non-blocking)
+  // Load profile + patterns when authenticated (non-blocking).
+  // Wipe them on sign-out so the next user starts with a clean slate.
   useEffect(() => {
     if (isAuthenticated && user) {
-      // Load all profile data so AI has complete context
-      setTimeout(() => {
-        loadAllProfile().catch(error => {
-          console.log('Profile load skipped:', error.message || 'No profile data available');
-        });
-      }, 0);
+      loadAllProfile().catch(error => {
+        console.log('Profile load skipped:', error.message || 'No profile data available');
+      });
+      loadPatterns().catch(error => {
+        console.log('Patterns load skipped:', error.message || 'No patterns available');
+      });
+    } else {
+      resetPatterns();
     }
-  }, [isAuthenticated, user, loadAllProfile]);
+  }, [isAuthenticated, user, loadAllProfile, loadPatterns, resetPatterns]);
+
+  // Push notifications: register token (if already permitted) + listen for
+  // foreground messages while a tab is open. Permission itself is requested
+  // from the Settings page so users explicitly opt in.
+  useEffect(() => {
+    if (!isAuthenticated || !user) return;
+    let unsub: (() => void) | undefined;
+    (async () => {
+      try {
+        const { session } = useAuthStore.getState();
+        await ensureFcmTokenRegistered(session?.access_token);
+        unsub = onForegroundMessage((payload) => {
+          const title = payload.notification?.title || 'Taskly';
+          const body = payload.notification?.body || '';
+          toast(`${title}\n${body}`, { duration: 6000 });
+        });
+      } catch (e) {
+        console.log('FCM init skipped:', e);
+      }
+    })();
+    return () => { try { unsub?.(); } catch { /* noop */ } };
+  }, [isAuthenticated, user]);
 
   return (
     <BrowserRouter>

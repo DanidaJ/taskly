@@ -22,6 +22,20 @@ class Settings(BaseSettings):
     
     # Firebase
     firebase_credentials_path: str = "./firebase-credentials.json"
+
+    # Firebase Web (public — safe to expose to browser; served via /notifications/web-config)
+    firebase_api_key: str = ""
+    firebase_auth_domain: str = ""
+    firebase_project_id: str = ""
+    firebase_storage_bucket: str = ""
+    firebase_messaging_sender_id: str = ""
+    firebase_app_id: str = ""
+    firebase_vapid_key: str = ""
+
+    # Notification scheduler
+    notifications_enabled: bool = True
+    notifications_default_timezone: str = "UTC"
+    notifications_break_interval_minutes: int = 0  # 0 = disabled (per-user only)
     
     # JWT
     jwt_secret: str = "your-secret-key-change-in-production"

@@ -43,66 +43,34 @@ export default function Reflection() {
 
   const today = format(new Date(), 'yyyy-MM-dd');
 
-  // Load today's data for context
+  // Load today's data for context (backend only)
   useEffect(() => {
-    const todayKey = new Date().toDateString();
     const yesterday = format(subDays(new Date(), 1), 'yyyy-MM-dd');
 
-    // Focus sessions: backend first, localStorage fallback
     focusSessionService.getForDate(today)
       .then((sessions: any[]) => {
-        if (sessions && sessions.length > 0) {
-          const total = sessions
-            .filter((s: any) => s.mode === 'focus' && s.completed)
-            .reduce((acc: number, s: any) => acc + s.duration / 60, 0);
-          setTodayFocusMinutes(Math.round(total));
-        } else {
-          const local = localStorage.getItem(`planiq-focus-sessions-${todayKey}`);
-          if (local) {
-            const parsed = JSON.parse(local);
-            const total = parsed
-              .filter((s: any) => s.mode === 'focus' && s.completed)
-              .reduce((acc: number, s: any) => acc + s.duration / 60, 0);
-            setTodayFocusMinutes(Math.round(total));
-          }
-        }
+        const total = (sessions || [])
+          .filter((s: any) => s.mode === 'focus' && s.completed)
+          .reduce((acc: number, s: any) => acc + s.duration / 60, 0);
+        setTodayFocusMinutes(Math.round(total));
       })
-      .catch(() => {
-        const local = localStorage.getItem(`planiq-focus-sessions-${todayKey}`);
-        if (local) {
-          const parsed = JSON.parse(local);
-          const total = parsed
-            .filter((s: any) => s.mode === 'focus' && s.completed)
-            .reduce((acc: number, s: any) => acc + s.duration / 60, 0);
-          setTodayFocusMinutes(Math.round(total));
-        }
+      .catch((error) => {
+        console.error('Failed to load focus sessions:', error);
       });
 
-    // Sleep: backend first, localStorage fallback
     sleepEntryService.getAll(7)
       .then((entries: any[]) => {
-        if (entries && entries.length > 0) {
-          const lastSleep = entries.find((e: any) => e.date === yesterday || e.date === today);
-          if (lastSleep) {
-            setLastNightSleep({ duration: lastSleep.duration, quality: lastSleep.quality });
-          }
-        } else {
-          loadSleepLocal(yesterday);
+        const lastSleep = (entries || []).find(
+          (e: any) => e.date === yesterday || e.date === today
+        );
+        if (lastSleep) {
+          setLastNightSleep({ duration: lastSleep.duration, quality: lastSleep.quality });
         }
       })
-      .catch(() => loadSleepLocal(yesterday));
+      .catch((error) => {
+        console.error('Failed to load sleep entries:', error);
+      });
   }, [today]);
-
-  const loadSleepLocal = (yesterday: string) => {
-    const sleepEntries = localStorage.getItem('planiq-sleep-entries');
-    if (sleepEntries) {
-      const entries = JSON.parse(sleepEntries);
-      const lastSleep = entries.find((e: any) => e.date === yesterday || e.date === today);
-      if (lastSleep) {
-        setLastNightSleep({ duration: lastSleep.duration, quality: lastSleep.quality });
-      }
-    }
-  };
 
   const completedTasks = plannedTasks.filter((t) => t.status === 'completed');
   const skippedTasks = plannedTasks.filter(

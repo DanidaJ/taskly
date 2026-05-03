@@ -1,147 +1,150 @@
-// Service Worker for Taskly PWA
-// Firebase Cloud Messaging integration
-
 /* eslint-disable no-undef */
+// Taskly Service Worker — Firebase Cloud Messaging + PWA cache
+//
+// Firebase web config is fetched at install time from the backend
+// (/api/v1/notifications/web-config) so we never need to hardcode keys here.
+
 importScripts('https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/9.22.0/firebase-messaging-compat.js');
 
-// Firebase configuration (will be replaced at build time or set from env)
-const firebaseConfig = {
-  apiKey: self.FIREBASE_API_KEY || '',
-  authDomain: self.FIREBASE_AUTH_DOMAIN || '',
-  projectId: self.FIREBASE_PROJECT_ID || '',
-  storageBucket: self.FIREBASE_STORAGE_BUCKET || '',
-  messagingSenderId: self.FIREBASE_MESSAGING_SENDER_ID || '',
-  appId: self.FIREBASE_APP_ID || '',
-};
+const CACHE_NAME = 'taskly-v2';
+const CONFIG_CACHE = 'taskly-config-v1';
+const STATIC_ASSETS = ['/', '/index.html', '/manifest.webmanifest'];
 
-// Initialize Firebase only if config is available
-if (firebaseConfig.apiKey) {
-  firebase.initializeApp(firebaseConfig);
-  const messaging = firebase.messaging();
-
-  // Handle background messages
-  messaging.onBackgroundMessage((payload) => {
-    console.log('[SW] Background message received:', payload);
-
-    const notificationTitle = payload.notification?.title || 'Taskly';
-    const notificationOptions = {
-      body: payload.notification?.body || 'You have a new notification',
-      icon: '/icons/icon-192x192.png',
-      badge: '/icons/badge-72x72.png',
-      tag: payload.data?.tag || 'taskly-notification',
-      data: payload.data,
-      actions: [
-        {
-          action: 'view',
-          title: 'View',
-        },
-        {
-          action: 'dismiss',
-          title: 'Dismiss',
-        },
-      ],
-    };
-
-    self.registration.showNotification(notificationTitle, notificationOptions);
-  });
+// Read API base from query param (?api=...) appended at SW registration time.
+// Falls back to current origin (assumes backend served behind same host/proxy).
+function getApiBase() {
+  try {
+    const url = new URL(self.location.href);
+    const fromQuery = url.searchParams.get('api');
+    return (fromQuery || self.location.origin).replace(/\/$/, '');
+  } catch (e) {
+    return self.location.origin;
+  }
 }
 
-// Handle notification click
-self.addEventListener('notificationclick', (event) => {
-  console.log('[SW] Notification clicked:', event.action);
-  event.notification.close();
-
-  if (event.action === 'view' || !event.action) {
-    // Open the app or focus existing tab
-    const urlToOpen = event.notification.data?.url || '/';
-
-    event.waitUntil(
-      clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
-        // Check if there's already a tab open
-        for (const client of windowClients) {
-          if (client.url === urlToOpen && 'focus' in client) {
-            return client.focus();
-          }
-        }
-        // Open new tab if no existing tab found
-        if (clients.openWindow) {
-          return clients.openWindow(urlToOpen);
-        }
-      })
-    );
+async function fetchAndCacheConfig() {
+  const apiBase = getApiBase();
+  try {
+    const res = await fetch(`${apiBase}/api/v1/notifications/web-config`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const cfg = await res.json();
+    const cache = await caches.open(CONFIG_CACHE);
+    await cache.put('firebase-config', new Response(JSON.stringify(cfg)));
+    return cfg;
+  } catch (err) {
+    console.warn('[SW] Could not fetch firebase web-config:', err);
+    return null;
   }
-});
+}
 
-// Cache strategies for PWA
-const CACHE_NAME = 'taskly-v1';
-const STATIC_ASSETS = [
-  '/',
-  '/index.html',
-  '/manifest.webmanifest',
-];
+async function getConfig() {
+  const cache = await caches.open(CONFIG_CACHE);
+  const cached = await cache.match('firebase-config');
+  if (cached) {
+    try { return await cached.json(); } catch { /* fallthrough */ }
+  }
+  return await fetchAndCacheConfig();
+}
 
-// Install event - cache static assets
+async function ensureMessaging() {
+  const cfg = await getConfig();
+  if (!cfg || !cfg.configured || !cfg.apiKey) return null;
+  if (!firebase.apps.length) {
+    firebase.initializeApp({
+      apiKey: cfg.apiKey,
+      authDomain: cfg.authDomain,
+      projectId: cfg.projectId,
+      storageBucket: cfg.storageBucket,
+      messagingSenderId: cfg.messagingSenderId,
+      appId: cfg.appId,
+    });
+  }
+  const messaging = firebase.messaging();
+  messaging.onBackgroundMessage((payload) => {
+    const title = payload.notification?.title || payload.data?.title || 'Taskly';
+    const options = {
+      body: payload.notification?.body || payload.data?.body || '',
+      icon: '/icons/icon-192x192.png',
+      badge: '/icons/icon-72x72.png',
+      tag: payload.data?.tag || payload.notification?.tag || 'taskly',
+      data: payload.data || {},
+    };
+    self.registration.showNotification(title, options);
+  });
+  return messaging;
+}
+
+// --------------------------- Lifecycle -----------------------------------
 self.addEventListener('install', (event) => {
-  console.log('[SW] Installing...');
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      console.log('[SW] Caching static assets');
-      return cache.addAll(STATIC_ASSETS);
-    })
+    (async () => {
+      const cache = await caches.open(CACHE_NAME);
+      try { await cache.addAll(STATIC_ASSETS); } catch (e) { console.warn('[SW] cache addAll failed', e); }
+      await fetchAndCacheConfig();
+      await ensureMessaging();
+      await self.skipWaiting();
+    })()
   );
-  self.skipWaiting();
 });
 
-// Activate event - clean old caches
 self.addEventListener('activate', (event) => {
-  console.log('[SW] Activating...');
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames
-          .filter((cacheName) => cacheName !== CACHE_NAME)
-          .map((cacheName) => {
-            console.log('[SW] Deleting old cache:', cacheName);
-            return caches.delete(cacheName);
-          })
+    (async () => {
+      const keys = await caches.keys();
+      await Promise.all(
+        keys.filter((k) => k !== CACHE_NAME && k !== CONFIG_CACHE).map((k) => caches.delete(k))
       );
-    })
+      await ensureMessaging();
+      await self.clients.claim();
+    })()
   );
-  self.clients.claim();
 });
 
-// Fetch event - network first, fallback to cache
+// Re-init messaging on any background event (some browsers terminate the SW)
+self.addEventListener('push', (event) => {
+  event.waitUntil(ensureMessaging());
+});
+
+// --------------------------- Notification clicks -------------------------
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const targetUrl = event.notification.data?.url || '/app';
+  event.waitUntil(
+    (async () => {
+      const allClients = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+      for (const client of allClients) {
+        const u = new URL(client.url);
+        if (u.pathname.startsWith('/app') && 'focus' in client) {
+          await client.focus();
+          if ('navigate' in client) { try { await client.navigate(targetUrl); } catch {} }
+          return;
+        }
+      }
+      if (clients.openWindow) await clients.openWindow(targetUrl);
+    })()
+  );
+});
+
+// --------------------------- Fetch cache (network-first) -----------------
 self.addEventListener('fetch', (event) => {
-  // Skip API requests
-  if (event.request.url.includes('/api/')) {
-    return;
-  }
-
+  const req = event.request;
+  if (req.method !== 'GET') return;
+  if (req.url.includes('/api/')) return; // never cache API
   event.respondWith(
-    fetch(event.request)
-      .then((response) => {
-        // Clone the response before caching
-        const responseToCache = response.clone();
-        caches.open(CACHE_NAME).then((cache) => {
-          cache.put(event.request, responseToCache);
-        });
-        return response;
+    fetch(req)
+      .then((res) => {
+        const copy = res.clone();
+        caches.open(CACHE_NAME).then((c) => c.put(req, copy)).catch(() => {});
+        return res;
       })
-      .catch(() => {
-        // Fallback to cache
-        return caches.match(event.request).then((cachedResponse) => {
-          if (cachedResponse) {
-            return cachedResponse;
-          }
-          // Return offline page for navigation requests
-          if (event.request.mode === 'navigate') {
-            return caches.match('/');
-          }
-          return new Response('Offline', { status: 503 });
-        });
+      .catch(async () => {
+        const cached = await caches.match(req);
+        if (cached) return cached;
+        if (req.mode === 'navigate') return caches.match('/') || new Response('Offline', { status: 503 });
+        return new Response('Offline', { status: 503 });
       })
   );
 });
 
-console.log('[SW] Service Worker loaded');
+console.log('[SW] Taskly service worker loaded');
