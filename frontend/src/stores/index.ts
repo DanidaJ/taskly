@@ -2,4 +2,8 @@ export { useAuthStore } from './authStore';
 export { useTaskStore } from './taskStore';
 export { useUserProfileStore } from './userProfileStore';
 export { useUserPatternsStore } from './userPatternsStore';
+export { useFocusCountdownStore, getRemainingSeconds } from './focusCountdownStore';
+export type { FocusTimerMode } from './focusCountdownStore';
+export { useTimerPromptStore } from './timerPromptStore';
+export type { TimerCompletionPromptInfo } from './timerPromptStore';
 export type { LearnedPattern } from './userPatternsStore';

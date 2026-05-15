@@ -17,12 +17,15 @@ import {
   BarChart3,
 } from 'lucide-react';
 import { Button } from '@/components/ui';
-import { useTaskStore } from '@/stores';
-import { focusSessionService, focusSettingsService, FocusSettings } from '@/services/api';
+import { getRemainingSeconds, useFocusCountdownStore, useTaskStore, useTimerPromptStore } from '@/stores';
+import { activeFocusTimerService, focusSessionService, focusSettingsService, FocusSettings } from '@/services/api';
+import { subscribeToTimerBroadcasts } from '@/services/timerBroadcast';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { format } from 'date-fns';
+import { parseDuration } from '@/utils';
+import TaskStartConfirmModal, { StartContext } from '@/components/TaskStartConfirmModal';
 
 type TimerMode = 'focus' | 'shortBreak' | 'longBreak';
 
@@ -86,23 +89,292 @@ export default function FocusTimer() {
 
   const [mode, setMode] = useState<TimerMode>('focus');
   const [timeLeft, setTimeLeft] = useState(DEFAULT_SETTINGS.focusDuration * 60);
+  const [sessionTotalSeconds, setSessionTotalSeconds] = useState(DEFAULT_SETTINGS.focusDuration * 60);
   const [isRunning, setIsRunning] = useState(false);
   const [sessionsCompleted, setSessionsCompleted] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedTaskName, setSelectedTaskName] = useState<string | null>(null);
+  const [taskDurationMinutes, setTaskDurationMinutes] = useState<number | null>(null);
+  const [taskDate, setTaskDate] = useState<string | null>(null);
+  const [autoStartRequested, setAutoStartRequested] = useState(false);
   const [todaySessions, setTodaySessions] = useState<FocusSession[]>([]);
+  // Track whether the current session has been confirmed (no double-modal)
+  const [sessionConfirmed, setSessionConfirmed] = useState(false);
+  const [showStartConfirm, setShowStartConfirm] = useState(false);
+  const [hydratedFromSharedSnapshot, setHydratedFromSharedSnapshot] = useState(false);
+  const [serverTimerHydrated, setServerTimerHydrated] = useState(false);
 
-  const { plannedTasks } = useTaskStore();
+  const { plannedTasks, loadPlanFromDatabase, updatePlannedTask } = useTaskStore();
+  const syncSharedCountdown = useFocusCountdownStore((state) => state.syncSnapshot);
+  // Completion prompt lives in a global store so it can be surfaced from Layout
+  // (mandatory yes/no even when the user has navigated away from FocusTimer).
+  const globalPrompt = useTimerPromptStore((state) => state.prompt);
+  const setGlobalPrompt = useTimerPromptStore((state) => state.setPrompt);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const countdownEndsAtRef = useRef<number | null>(null);
+  const timerSyncSignatureRef = useRef<string | null>(null);
+  // Set true right before state setters that originate from a cross-tab
+  // broadcast, so the save effect skips re-saving and we don't ping-pong.
+  const applyingRemoteTimerRef = useRef(false);
+  // Remember the next focus session count so we can transition into a break
+  // once the global prompt is answered while the user is still on this page.
+  const pendingBreakSessionRef = useRef<number | null>(null);
+  const lastPromptTaskIdRef = useRef<string | null>(null);
 
-  // Load task from URL parameter
+  const activeFocusDuration = taskDurationMinutes ?? settings.focusDuration;
+  const selectedTask = selectedTaskId
+    ? plannedTasks.find((task) => task.id === selectedTaskId) || null
+    : null;
+  const selectedTaskRequiresReschedule = selectedTask?.status === 'missed';
+
+  // Load task context from URL parameters
   useEffect(() => {
     const taskId = searchParams.get('task');
-    if (taskId) {
-      setSelectedTaskId(taskId);
+    const taskNameParam = searchParams.get('taskName');
+    const durationParam = searchParams.get('duration');
+    const dateParam = searchParams.get('date');
+    const sharedSnapshot = useFocusCountdownStore.getState();
+    const hasRunningSharedTimer = sharedSnapshot.isRunning;
+
+    const resolvedTaskId = taskId || (hasRunningSharedTimer ? sharedSnapshot.taskId : null);
+    const resolvedTaskName = taskNameParam || (hasRunningSharedTimer ? sharedSnapshot.taskName : null);
+
+    setSelectedTaskId(resolvedTaskId);
+    setSelectedTaskName(resolvedTaskName);
+    setTaskDurationMinutes(durationParam ? parseDuration(durationParam) : null);
+    setTaskDate(dateParam || null);
+    setAutoStartRequested(searchParams.get('autostart') === '1');
+
+    if (hasRunningSharedTimer) {
+      const remainingSeconds = getRemainingSeconds(sharedSnapshot.endsAt, sharedSnapshot.timeLeft);
+      setMode(sharedSnapshot.mode);
+      setTimeLeft(remainingSeconds);
+      setSessionTotalSeconds(Math.max(sharedSnapshot.sessionTotalSeconds || 0, remainingSeconds));
+      setIsRunning(remainingSeconds > 0);
+      setSessionConfirmed(true);
     }
+
+    setHydratedFromSharedSnapshot(true);
   }, [searchParams]);
+
+  // Keep the app-wide mini popup in sync with the timer state.
+  useEffect(() => {
+    if (!hydratedFromSharedSnapshot) return;
+
+    syncSharedCountdown({
+      isRunning,
+      mode,
+      timeLeft,
+      sessionTotalSeconds,
+      taskId: selectedTaskId,
+      taskName: selectedTaskName,
+    });
+  }, [
+    hydratedFromSharedSnapshot,
+    isRunning,
+    mode,
+    sessionTotalSeconds,
+    selectedTaskId,
+    selectedTaskName,
+    syncSharedCountdown,
+    timeLeft,
+  ]);
+
+  // Hydrate from backend so timer survives app close, browser close, and device restart.
+  useEffect(() => {
+    let cancelled = false;
+
+    activeFocusTimerService.get()
+      .then((serverTimer) => {
+        if (cancelled || !serverTimer) {
+          return;
+        }
+
+        const startedAtMs = serverTimer.started_at ? new Date(serverTimer.started_at).getTime() : null;
+        const elapsedSeconds = serverTimer.is_running && startedAtMs
+          ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
+          : 0;
+        const remainingSeconds = serverTimer.is_running
+          ? Math.max(0, serverTimer.remaining_seconds - elapsedSeconds)
+          : Math.max(0, serverTimer.remaining_seconds);
+
+        timerSyncSignatureRef.current = null;
+        setMode(serverTimer.mode);
+        setSelectedTaskId(serverTimer.task_id || null);
+        setSelectedTaskName(serverTimer.task_name || null);
+        setTaskDate(serverTimer.task_date || null);
+        setSessionTotalSeconds(Math.max(serverTimer.total_seconds || 0, remainingSeconds));
+        setTimeLeft(remainingSeconds);
+        setIsRunning(serverTimer.is_running);
+        setSessionConfirmed(true);
+        setAutoStartRequested(false);
+
+        if (serverTimer.mode === 'focus' && serverTimer.total_seconds > 0) {
+          setTaskDurationMinutes(Math.max(1, Math.round(serverTimer.total_seconds / 60)));
+        }
+      })
+      .catch((error) => {
+        console.error('Failed to load active focus timer:', error);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setServerTimerHydrated(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Persist timer state changes to backend (without syncing every second while running).
+  useEffect(() => {
+    if (!hydratedFromSharedSnapshot || !serverTimerHydrated) return;
+
+    const signature = isRunning
+      ? `running|${mode}|${selectedTaskId || ''}|${selectedTaskName || ''}|${taskDate || ''}|${sessionTotalSeconds}`
+      : `paused|${mode}|${selectedTaskId || ''}|${selectedTaskName || ''}|${taskDate || ''}|${sessionTotalSeconds}|${timeLeft}`;
+
+    if (timerSyncSignatureRef.current === signature) {
+      return;
+    }
+
+    // If the state change came from another tab's broadcast, skip the save —
+    // otherwise the two tabs would ping-pong saves and the BroadcastChannel
+    // loop would echo back into a feedback cycle.
+    if (applyingRemoteTimerRef.current) {
+      applyingRemoteTimerRef.current = false;
+      timerSyncSignatureRef.current = signature;
+      return;
+    }
+
+    timerSyncSignatureRef.current = signature;
+    activeFocusTimerService.save({
+      mode,
+      task_id: selectedTaskId,
+      task_name: selectedTaskName,
+      task_date: taskDate,
+      is_running: isRunning,
+      remaining_seconds: Math.max(0, timeLeft),
+      total_seconds: Math.max(0, sessionTotalSeconds),
+      started_at: isRunning ? new Date().toISOString() : null,
+    }).catch((error) => {
+      console.error('Failed to save active focus timer:', error);
+    });
+  }, [
+    hydratedFromSharedSnapshot,
+    isRunning,
+    mode,
+    selectedTaskId,
+    selectedTaskName,
+    taskDate,
+    serverTimerHydrated,
+    sessionTotalSeconds,
+    timeLeft,
+  ]);
+
+  // Apply timer changes broadcast from another tab so concurrent FocusTimer
+  // instances stay in lockstep instead of overwriting each other.
+  useEffect(() => {
+    return subscribeToTimerBroadcasts((msg) => {
+      applyingRemoteTimerRef.current = true;
+
+      if (msg.type === 'cleared') {
+        setIsRunning(false);
+        setSelectedTaskId(null);
+        setSelectedTaskName(null);
+        setTaskDate(null);
+        setTimeLeft(0);
+        setSessionTotalSeconds(0);
+        setSessionConfirmed(false);
+        return;
+      }
+
+      const timer = msg.timer;
+      const startedAtMs = timer.started_at ? new Date(timer.started_at).getTime() : null;
+      const elapsedSeconds = timer.is_running && startedAtMs
+        ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
+        : 0;
+      const remaining = timer.is_running
+        ? Math.max(0, timer.remaining_seconds - elapsedSeconds)
+        : Math.max(0, timer.remaining_seconds);
+
+      setMode(timer.mode);
+      setSelectedTaskId(timer.task_id || null);
+      setSelectedTaskName(timer.task_name || null);
+      setTaskDate(timer.task_date || null);
+      setSessionTotalSeconds(Math.max(timer.total_seconds || 0, remaining));
+      setTimeLeft(remaining);
+      setIsRunning(timer.is_running);
+      setSessionConfirmed(true);
+      if (timer.mode === 'focus' && timer.total_seconds > 0) {
+        setTaskDurationMinutes(Math.max(1, Math.round(timer.total_seconds / 60)));
+      }
+    });
+  }, []);
+
+  // If timer ended while user was away (or on first load with an expired timer),
+  // hand the mandatory decision off to the global prompt store.
+  useEffect(() => {
+    if (!serverTimerHydrated) return;
+    if (globalPrompt) return;
+    if (mode !== 'focus' || timeLeft !== 0 || !selectedTaskId) return;
+
+    const task = plannedTasks.find((t) => t.id === selectedTaskId);
+    if (task && ['completed', 'cancelled', 'skipped', 'missed'].includes(task.status)) {
+      return;
+    }
+
+    const completedFocusSessions = todaySessions.filter((s) => s.mode === 'focus' && s.completed).length;
+    const completedSessionCount = Math.max(1, sessionsCompleted, completedFocusSessions);
+    const durationMinutes = Math.max(
+      1,
+      Math.round(((sessionTotalSeconds > 0 ? sessionTotalSeconds : activeFocusDuration * 60) / 60)),
+    );
+
+    pendingBreakSessionRef.current = completedSessionCount;
+    setGlobalPrompt({
+      taskId: selectedTaskId,
+      taskName: task?.task_name || selectedTaskName || 'Task',
+      taskDate: taskDate || format(new Date(), 'yyyy-MM-dd'),
+      durationMinutes,
+      nextSessionCount: completedSessionCount,
+    });
+  }, [
+    activeFocusDuration,
+    globalPrompt,
+    mode,
+    plannedTasks,
+    selectedTaskId,
+    selectedTaskName,
+    serverTimerHydrated,
+    sessionTotalSeconds,
+    sessionsCompleted,
+    setGlobalPrompt,
+    taskDate,
+    timeLeft,
+    todaySessions,
+  ]);
+
+  // If a task date was provided, ensure that plan is loaded so task metadata/status can be resolved.
+  useEffect(() => {
+    if (!taskDate) return;
+    loadPlanFromDatabase(taskDate).catch((error) => {
+      console.log('Task date plan load skipped:', error?.message || 'No plan available');
+    });
+  }, [taskDate, loadPlanFromDatabase]);
+
+  // Keep selected task name and duration in sync with latest plan data.
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    const selectedTask = plannedTasks.find((task) => task.id === selectedTaskId);
+    if (!selectedTask) return;
+
+    setSelectedTaskName(selectedTask.task_name);
+    setTaskDurationMinutes(parseDuration(selectedTask.suggested_duration));
+  }, [selectedTaskId, plannedTasks]);
 
   // Load settings from backend
   useEffect(() => {
@@ -110,14 +382,11 @@ export default function FocusTimer() {
       .then((remote) => {
         const mapped = settingsFromBackend(remote);
         setSettings(mapped);
-        // Only refresh timeLeft for the focus mode if the timer hasn't started.
-        setTimeLeft((prev) => (isRunning ? prev : mapped.focusDuration * 60));
       })
       .catch((error) => {
         console.error('Failed to load focus settings:', error);
       })
       .finally(() => setSettingsLoaded(true));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Load today's sessions from backend (single source of truth)
@@ -153,22 +422,136 @@ export default function FocusTimer() {
     });
   }, [settings, settingsLoaded]);
 
-  // Timer logic
+  // When a task-specific duration changes, sync timer display while not running.
   useEffect(() => {
-    if (isRunning && timeLeft > 0) {
-      intervalRef.current = setInterval(() => {
-        setTimeLeft((prev) => prev - 1);
-      }, 1000);
-    } else if (timeLeft === 0) {
-      handleTimerComplete();
+    if (!hydratedFromSharedSnapshot) return;
+    if (mode !== 'focus' || isRunning) return;
+
+    // If the timer is paused mid-session, keep its remaining seconds unchanged.
+    if (sessionTotalSeconds > 0 && timeLeft !== sessionTotalSeconds) {
+      return;
     }
+
+    const nextSeconds = activeFocusDuration * 60;
+    setSessionTotalSeconds(nextSeconds);
+    setTimeLeft(nextSeconds);
+  }, [
+    activeFocusDuration,
+    hydratedFromSharedSnapshot,
+    isRunning,
+    mode,
+    sessionTotalSeconds,
+    timeLeft,
+  ]);
+
+  // Support one-click task start flow from dashboard/schedule.
+  // When autostart is requested we bypass the confirm modal — user already confirmed.
+  useEffect(() => {
+    if (!serverTimerHydrated) return;
+    if (!autoStartRequested || mode !== 'focus' || isRunning) return;
+
+    // Wait until the planned task is hydrated before deciding whether autostart is allowed.
+    // Without this, a 'missed' task can autostart in the race between URL parsing and plan load.
+    if (selectedTaskId && !selectedTask) return;
+
+    if (selectedTaskRequiresReschedule) {
+      toast.error('This task must be rescheduled before it can be started again.');
+      setAutoStartRequested(false);
+      return;
+    }
+
+    setSessionConfirmed(true); // pre-confirm so manual play won't re-ask
+    // Persist the in-progress lifecycle even though the caller normally does it.
+    // Direct/bookmarked autostart URLs and failed caller updates would otherwise
+    // leave the task as 'pending' while timing actively runs.
+    if (
+      selectedTaskId
+      && selectedTask
+      && !['in_progress', 'completed', 'skipped', 'cancelled', 'missed'].includes(selectedTask.status)
+    ) {
+      updatePlannedTask(selectedTaskId, {
+        status: 'in_progress',
+        actual_start: selectedTask.actual_start || new Date().toISOString(),
+      }).catch((error) => {
+        console.error('Failed to mark autostart task in progress:', error);
+      });
+    }
+    if (sessionTotalSeconds <= 0) {
+      setSessionTotalSeconds(Math.max(timeLeft, activeFocusDuration * 60));
+    }
+    setIsRunning(true);
+    setAutoStartRequested(false);
+  }, [
+    activeFocusDuration,
+    autoStartRequested,
+    isRunning,
+    mode,
+    selectedTask,
+    selectedTaskId,
+    selectedTaskRequiresReschedule,
+    serverTimerHydrated,
+    sessionTotalSeconds,
+    timeLeft,
+    updatePlannedTask,
+  ]);
+
+  // Timer loop based on absolute end timestamp (survives sleep/throttling accurately).
+  useEffect(() => {
+    if (!isRunning) {
+      countdownEndsAtRef.current = null;
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
+      return;
+    }
+
+    countdownEndsAtRef.current = Date.now() + Math.max(0, timeLeft) * 1000;
+
+    const tick = () => {
+      if (!countdownEndsAtRef.current) return;
+      const remaining = Math.max(0, Math.ceil((countdownEndsAtRef.current - Date.now()) / 1000));
+      setTimeLeft((prev) => (prev === remaining ? prev : remaining));
+    };
+
+    tick();
+    intervalRef.current = setInterval(tick, 250);
 
     return () => {
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
       }
     };
+  }, [isRunning]);
+
+  useEffect(() => {
+    if (!isRunning || timeLeft !== 0) return;
+    countdownEndsAtRef.current = null;
+    handleTimerComplete();
   }, [isRunning, timeLeft]);
+
+  const transitionToBreakAfterFocus = useCallback((completedSessionCount: number) => {
+    const nextMode = completedSessionCount % settings.sessionsBeforeLongBreak === 0
+      ? 'longBreak'
+      : 'shortBreak';
+    const nextDurationSeconds = nextMode === 'longBreak'
+      ? settings.longBreakDuration * 60
+      : settings.shortBreakDuration * 60;
+
+    setMode(nextMode);
+    setSessionTotalSeconds(nextDurationSeconds);
+    setTimeLeft(nextDurationSeconds);
+
+    if (settings.autoStartBreaks) {
+      setTimeout(() => setIsRunning(true), 1000);
+    }
+  }, [settings.autoStartBreaks, settings.longBreakDuration, settings.sessionsBeforeLongBreak, settings.shortBreakDuration]);
+
+  const requestNotificationPermission = useCallback(() => {
+    if (typeof window === 'undefined' || !("Notification" in window)) return;
+    if (Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => undefined);
+    }
+  }, []);
 
   const handleTimerComplete = () => {
     setIsRunning(false);
@@ -180,10 +563,15 @@ export default function FocusTimer() {
 
     // Record session
     if (mode === 'focus') {
-      const startTime = new Date(Date.now() - settings.focusDuration * 60 * 1000);
+      const effectiveSessionSeconds = sessionTotalSeconds > 0
+        ? sessionTotalSeconds
+        : activeFocusDuration * 60;
+      const completedFocusDuration = Math.max(1, Math.round(effectiveSessionSeconds / 60));
+      const startTime = new Date(Date.now() - effectiveSessionSeconds * 1000);
       const endTime = new Date();
+      const nextSessionCount = sessionsCompleted + 1;
       const taskName = selectedTaskId
-        ? plannedTasks.find(t => t.id === selectedTaskId)?.task_name
+        ? plannedTasks.find(t => t.id === selectedTaskId)?.task_name || selectedTaskName || undefined
         : undefined;
       const tempId = `tmp-${Date.now()}`;
       const optimistic: FocusSession = {
@@ -192,12 +580,12 @@ export default function FocusTimer() {
         taskName,
         startTime,
         endTime,
-        duration: settings.focusDuration * 60,
+        duration: effectiveSessionSeconds,
         mode: 'focus',
         completed: true,
       };
       setTodaySessions(prev => [...prev, optimistic]);
-      setSessionsCompleted(prev => prev + 1);
+      setSessionsCompleted(nextSessionCount);
 
       // Persist to backend; replace temp id with the real one once saved.
       focusSessionService.save({
@@ -205,7 +593,7 @@ export default function FocusTimer() {
         task_name: taskName || null,
         start_time: startTime.toISOString(),
         end_time: endTime.toISOString(),
-        duration: settings.focusDuration * 60,
+        duration: effectiveSessionSeconds,
         mode: 'focus',
         completed: true,
         session_date: format(new Date(), 'yyyy-MM-dd'),
@@ -219,27 +607,31 @@ export default function FocusTimer() {
           setTodaySessions(prev => prev.filter(s => s.id !== tempId));
           setSessionsCompleted(prev => Math.max(0, prev - 1));
         });
-      
-      toast.success(`🎉 Focus session complete! ${sessionsCompleted + 1} sessions today.`);
 
-      // Determine next break type
-      const nextMode = (sessionsCompleted + 1) % settings.sessionsBeforeLongBreak === 0
-        ? 'longBreak'
-        : 'shortBreak';
-      
-      setMode(nextMode);
-      setTimeLeft(nextMode === 'longBreak' 
-        ? settings.longBreakDuration * 60 
-        : settings.shortBreakDuration * 60
-      );
-
-      if (settings.autoStartBreaks) {
-        setTimeout(() => setIsRunning(true), 1000);
+      if (selectedTaskId) {
+        const task = plannedTasks.find((t) => t.id === selectedTaskId);
+        if (task && !['completed', 'cancelled', 'skipped'].includes(task.status)) {
+          pendingBreakSessionRef.current = nextSessionCount;
+          setGlobalPrompt({
+            taskId: task.id,
+            taskName: task.task_name,
+            taskDate: taskDate || format(new Date(), 'yyyy-MM-dd'),
+            durationMinutes: completedFocusDuration,
+            nextSessionCount,
+          });
+          toast('Timer went off for this task. Please mark it complete or incomplete.');
+          return;
+        }
       }
+
+      toast.success(`Focus session complete! ${nextSessionCount} sessions today.`);
+      transitionToBreakAfterFocus(nextSessionCount);
     } else {
       toast.success('Break complete! Ready to focus again?');
+      const nextFocusSeconds = activeFocusDuration * 60;
       setMode('focus');
-      setTimeLeft(settings.focusDuration * 60);
+      setSessionTotalSeconds(nextFocusSeconds);
+      setTimeLeft(nextFocusSeconds);
 
       if (settings.autoStartFocus) {
         setTimeout(() => setIsRunning(true), 1000);
@@ -267,28 +659,158 @@ export default function FocusTimer() {
     }, 200);
   };
 
+  // When the global prompt is answered, transition into the appropriate break
+  // here if the user is still on FocusTimer. (Global cleanup handles backend state.)
+  useEffect(() => {
+    const currentTaskId = globalPrompt?.taskId || null;
+
+    if (currentTaskId) {
+      lastPromptTaskIdRef.current = currentTaskId;
+      return;
+    }
+
+    if (!lastPromptTaskIdRef.current) return;
+
+    lastPromptTaskIdRef.current = null;
+    const pendingCount = pendingBreakSessionRef.current;
+    pendingBreakSessionRef.current = null;
+    setSessionConfirmed(false);
+    if (pendingCount !== null) {
+      transitionToBreakAfterFocus(pendingCount);
+    }
+  }, [globalPrompt, transitionToBreakAfterFocus]);
+
+  const markTaskInProgressWithContext = useCallback((context?: StartContext) => {
+    if (!selectedTaskId || mode !== 'focus') return;
+
+    const selectedTask = plannedTasks.find((task) => task.id === selectedTaskId);
+    if (
+      !selectedTask
+      || selectedTask.status === 'completed'
+      || selectedTask.status === 'in_progress'
+      || selectedTask.status === 'skipped'
+      || selectedTask.status === 'cancelled'
+      || selectedTask.status === 'missed'
+    ) {
+      return;
+    }
+
+    updatePlannedTask(selectedTaskId, {
+      status: 'in_progress',
+      actual_start: new Date().toISOString(),
+      start_type: context?.type,
+      minutes_offset: context?.minutesOffset,
+    }).catch((error) => {
+      console.error('Failed to mark selected task in progress:', error);
+    });
+  }, [mode, plannedTasks, selectedTaskId, updatePlannedTask]);
+
+  const markTaskInProgress = useCallback(() => {
+    markTaskInProgressWithContext(undefined);
+  }, [markTaskInProgressWithContext]);
+
+  const handleManualStartConfirmed = useCallback((context: StartContext) => {
+    if (selectedTaskRequiresReschedule) {
+      setShowStartConfirm(false);
+      toast.error('This task needs rescheduling before it can be started.');
+      return;
+    }
+
+    setShowStartConfirm(false);
+    setSessionConfirmed(true);
+    markTaskInProgressWithContext(context);
+    if (sessionTotalSeconds <= 0) {
+      setSessionTotalSeconds(Math.max(timeLeft, activeFocusDuration * 60));
+    }
+    requestNotificationPermission();
+    setIsRunning(true);
+  }, [activeFocusDuration, markTaskInProgressWithContext, requestNotificationPermission, selectedTaskRequiresReschedule, sessionTotalSeconds, timeLeft]);
+
   const toggleTimer = () => {
-    setIsRunning(!isRunning);
+    if (globalPrompt) {
+      return;
+    }
+
+    // Pausing — always allow
+    if (isRunning) {
+      setIsRunning(false);
+      return;
+    }
+
+    if (selectedTaskId && mode === 'focus' && selectedTaskRequiresReschedule) {
+      toast.error('This task needs rescheduling before you can start it again.');
+      return;
+    }
+
+    // Starting: if there's a selected task and this is a fresh session, show confirm modal
+    if (selectedTaskId && mode === 'focus' && !sessionConfirmed) {
+      setShowStartConfirm(true);
+      return;
+    }
+
+    // No task selected or already confirmed: start directly
+    if (!sessionConfirmed) {
+      markTaskInProgress();
+    }
+
+    if (sessionTotalSeconds <= 0) {
+      setSessionTotalSeconds(Math.max(timeLeft, activeFocusDuration * 60));
+    }
+    requestNotificationPermission();
+    setIsRunning(true);
   };
 
+  const selectTask = useCallback((taskId: string | null) => {
+    setSelectedTaskId(taskId);
+    setSessionConfirmed(false); // new task selection resets confirmation
+
+    if (!taskId) {
+      setSelectedTaskName(null);
+      setTaskDurationMinutes(null);
+      return;
+    }
+
+    const selectedTask = plannedTasks.find((task) => task.id === taskId);
+    if (selectedTask) {
+      setSelectedTaskName(selectedTask.task_name);
+      setTaskDurationMinutes(parseDuration(selectedTask.suggested_duration));
+    }
+  }, [plannedTasks]);
+
   const resetTimer = () => {
+    // Reset/Switch must NOT clear the global completion prompt — the user
+    // has to answer yes/no first, that's the whole point of the gate.
+    if (globalPrompt) {
+      toast('Answer the completion prompt first before resetting.');
+      return;
+    }
     setIsRunning(false);
-    const duration = mode === 'focus' 
-      ? settings.focusDuration 
-      : mode === 'shortBreak' 
-        ? settings.shortBreakDuration 
+    setSessionConfirmed(false); // reset allows re-confirm on next start
+    const duration = mode === 'focus'
+      ? activeFocusDuration
+      : mode === 'shortBreak'
+        ? settings.shortBreakDuration
         : settings.longBreakDuration;
+    setSessionTotalSeconds(duration * 60);
     setTimeLeft(duration * 60);
   };
 
   const switchMode = (newMode: TimerMode) => {
+    if (globalPrompt) {
+      toast('Answer the completion prompt first before switching modes.');
+      return;
+    }
     setIsRunning(false);
+    if (newMode !== 'focus') {
+      setSessionConfirmed(false);
+    }
     setMode(newMode);
     const duration = newMode === 'focus' 
-      ? settings.focusDuration 
+      ? activeFocusDuration 
       : newMode === 'shortBreak' 
         ? settings.shortBreakDuration 
         : settings.longBreakDuration;
+    setSessionTotalSeconds(duration * 60);
     setTimeLeft(duration * 60);
   };
 
@@ -299,11 +821,13 @@ export default function FocusTimer() {
   };
 
   const progress = () => {
-    const total = mode === 'focus' 
-      ? settings.focusDuration * 60 
-      : mode === 'shortBreak' 
-        ? settings.shortBreakDuration * 60 
+    const fallbackTotal = mode === 'focus'
+      ? activeFocusDuration * 60
+      : mode === 'shortBreak'
+        ? settings.shortBreakDuration * 60
         : settings.longBreakDuration * 60;
+    const total = sessionTotalSeconds > 0 ? sessionTotalSeconds : fallbackTotal;
+    if (total <= 0) return 0;
     return ((total - timeLeft) / total) * 100;
   };
 
@@ -344,6 +868,11 @@ export default function FocusTimer() {
             <p className="text-gray-600 mt-1">
               {mode === 'focus' ? 'Time to concentrate' : 'Take a break'}
             </p>
+            {mode === 'focus' && selectedTaskName && (
+              <p className="text-sm text-blue-600 mt-1">
+                {selectedTaskName} | {activeFocusDuration} min
+              </p>
+            )}
           </div>
         </div>
 
@@ -472,16 +1001,34 @@ export default function FocusTimer() {
             <label className="text-sm text-gray-700 block mb-2">Working on:</label>
             <select
               value={selectedTaskId || ''}
-              onChange={(e) => setSelectedTaskId(e.target.value || null)}
+              onChange={(e) => selectTask(e.target.value || null)}
               className="bg-white border border-gray-300 rounded-apple px-4 py-2 text-gray-900 w-full max-w-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
             >
               <option value="">Select a task (optional)</option>
-              {plannedTasks.map((task) => (
-                <option key={task.id} value={task.id}>
-                  {task.task_name}
-                </option>
-              ))}
+              {plannedTasks.map((task) => {
+                const isBlocked = ['completed', 'cancelled', 'skipped', 'missed'].includes(task.status);
+                const blockedLabel = task.status === 'missed'
+                  ? ' - reschedule required'
+                  : task.status === 'completed'
+                    ? ' - completed'
+                    : task.status === 'cancelled'
+                      ? ' - cancelled'
+                      : task.status === 'skipped'
+                        ? ' - skipped'
+                        : '';
+
+                return (
+                  <option key={task.id} value={task.id} disabled={isBlocked}>
+                    {task.task_name} ({parseDuration(task.suggested_duration)} min){blockedLabel}
+                  </option>
+                );
+              })}
             </select>
+            {selectedTaskRequiresReschedule && (
+              <p className="text-xs text-amber-700 mt-2">
+                Timer already ended for this task and it is still incomplete. Reschedule it from Schedule before starting again.
+              </p>
+            )}
           </div>
         )}
       </motion.div>
@@ -644,6 +1191,25 @@ export default function FocusTimer() {
           )}
         </div>
       </div>
+
+      {/* Timer-completion prompt now renders globally in Layout via
+          <GlobalTimerCompletionPrompt /> so the mandatory yes/no surfaces
+          regardless of which page the user is on after expiry. */}
+
+      {/* Task Start Confirmation Modal (manual play with a selected task) */}
+      {showStartConfirm && selectedTaskId && (() => {
+        const task = plannedTasks.find((t) => t.id === selectedTaskId);
+        if (!task) return null;
+        return (
+          <TaskStartConfirmModal
+            isOpen={showStartConfirm}
+            task={task}
+            taskDate={taskDate || format(new Date(), 'yyyy-MM-dd')}
+            onConfirm={handleManualStartConfirmed}
+            onCancel={() => setShowStartConfirm(false)}
+          />
+        );
+      })()}
     </div>
   );
 }

@@ -13,6 +13,8 @@ from app.models import (
     FocusSessionCreate,
     FocusSession,
     FocusBulkSync,
+    ActiveFocusTimerUpsert,
+    ActiveFocusTimerResponse,
     SleepEntryCreate,
     SleepEntryResponse,
     SleepBulkSync,
@@ -106,6 +108,61 @@ async def sync_focus_sessions(
         await db.bulk_save_focus_sessions(sessions_data)
 
     return {"synced": len(bulk.sessions)}
+
+
+@router.get("/active-focus-timer", response_model=ActiveFocusTimerResponse | None)
+async def get_active_focus_timer(
+    current_user: dict = Depends(get_current_user),
+):
+    """Get the current active/paused focus timer snapshot for this user."""
+    if db is None:
+        return None
+    return await db.get_active_focus_timer(current_user["user_id"])
+
+
+@router.put("/active-focus-timer", response_model=ActiveFocusTimerResponse)
+async def save_active_focus_timer(
+    payload: ActiveFocusTimerUpsert,
+    current_user: dict = Depends(get_current_user),
+):
+    """Upsert active focus timer snapshot for this user."""
+    timer_data = {
+        "user_id": current_user["user_id"],
+        **payload.model_dump(),
+    }
+
+    if db is None:
+        now = datetime.utcnow()
+        return ActiveFocusTimerResponse(
+            id=str(uuid.uuid4()),
+            user_id=current_user["user_id"],
+            created_at=now,
+            updated_at=now,
+            **payload.model_dump(),
+        )
+
+    saved = await db.save_active_focus_timer(timer_data)
+    if saved:
+        return saved
+
+    now = datetime.utcnow()
+    return ActiveFocusTimerResponse(
+        id=str(uuid.uuid4()),
+        user_id=current_user["user_id"],
+        created_at=now,
+        updated_at=now,
+        **payload.model_dump(),
+    )
+
+
+@router.delete("/active-focus-timer")
+async def clear_active_focus_timer(
+    current_user: dict = Depends(get_current_user),
+):
+    """Clear active focus timer snapshot for this user."""
+    if db is not None:
+        await db.clear_active_focus_timer(current_user["user_id"])
+    return {"message": "Active timer cleared"}
 
 
 # ============================================

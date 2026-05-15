@@ -183,6 +183,26 @@ class SupabaseDB:
         response = self.client.table('focus_sessions').insert(sessions).execute()
         return response.data
 
+    async def get_active_focus_timer(self, user_id: str):
+        response = self.client.table('active_focus_timers').select('*').eq('user_id', user_id).execute()
+        return response.data[0] if response.data else None
+
+    async def save_active_focus_timer(self, timer_data: dict):
+        from datetime import datetime
+        payload = {
+            **timer_data,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        response = self.client.table('active_focus_timers').upsert(
+            payload,
+            on_conflict='user_id',
+        ).execute()
+        return response.data[0] if response.data else None
+
+    async def clear_active_focus_timer(self, user_id: str):
+        response = self.client.table('active_focus_timers').delete().eq('user_id', user_id).execute()
+        return response.data
+
     # Sleep Entries
     async def get_sleep_entries(self, user_id: str, limit: int = 90):
         """Get sleep entries, most recent first"""

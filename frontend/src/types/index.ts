@@ -10,6 +10,9 @@ export type Priority = 'high' | 'medium' | 'low';
 // Task status
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'skipped' | 'cancelled' | 'missed';
 
+// Task start type – records timing context when a task session begins
+export type TaskStartType = 'on_time' | 'early' | 'delayed';
+
 // Energy preference
 export type EnergyPreference = 'morning' | 'afternoon' | 'evening' | 'night';
 
@@ -41,6 +44,9 @@ export interface PlannedTask {
   actual_end?: string;
   status: TaskStatus;
   order: number;
+  // Start-timing context (written once on first start, never overwritten)
+  start_type?: TaskStartType;
+  minutes_offset?: number; // negative = started early, positive = started late
 }
 
 // Daily plan

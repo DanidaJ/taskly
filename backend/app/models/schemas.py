@@ -104,6 +104,9 @@ class PlannedTaskUpdate(BaseModel):
     actual_start: Optional[str] = None
     actual_end: Optional[str] = None
     order: Optional[int] = None
+    # Start-timing context — recorded once when the user first starts the task
+    start_type: Optional[str] = None       # 'on_time' | 'early' | 'delayed'
+    minutes_offset: Optional[int] = None   # <0 early, >0 late (minutes)
 
 
 class PlannedTask(PlannedTaskBase):
@@ -445,6 +448,27 @@ class FocusBulkSync(BaseModel):
     """Bulk sync focus sessions for a given date"""
     date: str  # YYYY-MM-DD
     sessions: List[FocusSessionCreate]
+
+
+class ActiveFocusTimerUpsert(BaseModel):
+    mode: Literal["focus", "shortBreak", "longBreak"] = "focus"
+    task_id: Optional[str] = None
+    task_name: Optional[str] = None
+    task_date: Optional[str] = None
+    is_running: bool = False
+    remaining_seconds: int = Field(ge=0, default=0)
+    total_seconds: int = Field(ge=0, default=0)
+    started_at: Optional[str] = None
+
+
+class ActiveFocusTimerResponse(ActiveFocusTimerUpsert):
+    id: str
+    user_id: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 # ============================================

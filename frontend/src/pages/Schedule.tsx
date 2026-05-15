@@ -28,6 +28,11 @@ import { CognitiveLoadBadge, PriorityBadge } from '@/components/ui/Badge';
 import { CalendarView } from '@/components/calendar';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
+import { useNavigate } from 'react-router-dom';
+import { buildFocusTaskUrl } from '@/utils';
+import { getTaskBadgeClasses, getTaskLifecycleTimeline, getTaskStartBadge, getTaskStatusBadge, getTaskTimerBadge, getTaskTimerReason, getTaskUserNotes } from '@/utils/taskLifecycle';
+import TaskStartConfirmModal, { getStartContext, StartContext } from '@/components/TaskStartConfirmModal';
+import ReschedulePanel from '@/components/ReschedulePanel';
 
 type ViewMode = 'list' | 'calendar';
 
@@ -49,24 +54,22 @@ const cognitiveBgColors: Record<string, string> = {
 };
 
 export default function Schedule() {
+  const navigate = useNavigate();
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [viewMode, setViewMode] = useState<ViewMode>('calendar');
   const [selectedTask, setSelectedTask] = useState<PlannedTask | null>(null);
+  const [isNotesExpanded, setIsNotesExpanded] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editedTask, setEditedTask] = useState<PlannedTask | null>(null);
   const [taskToDelete, setTaskToDelete] = useState<string | null>(null);
-  
-  const { plannedTasks, updatePlannedTask, deletePlannedTask, tasks, loadPlanFromDatabase, loadPlansForDateRange, plansByDate, checkMissedTasks, getMissedTasks, rescheduleTask } = useTaskStore();
+  const [taskToConfirmStart, setTaskToConfirmStart] = useState<PlannedTask | null>(null);
+  const [customRescheduleOpen, setCustomRescheduleOpen] = useState(false);
+
+  const { plannedTasks, updatePlannedTask, deletePlannedTask, tasks, loadPlanFromDatabase, loadPlansForDateRange, plansByDate, getMissedTasks, rescheduleTask } = useTaskStore();
   const { commitments } = useUserProfileStore();
   const [rescheduleLoading, setRescheduleLoading] = useState<string | null>(null);
 
-  // Periodically check for missed tasks (every 60s)
-  useEffect(() => {
-    checkMissedTasks();
-    const interval = setInterval(checkMissedTasks, 60000);
-    return () => clearInterval(interval);
-  }, [checkMissedTasks]);
-
+  // Missed-task enforcement runs globally in Layout, so we just read the list here.
   const missedTasks = getMissedTasks();
 
   const handleReschedule = useCallback(async (taskId: string, mode: 'next_slot' | 'tomorrow' | 'skip') => {
@@ -126,31 +129,84 @@ export default function Schedule() {
   };
 
   const handleStatusChange = async (taskId: string, newStatus: PlannedTask['status']) => {
+    const existingTask = plannedTasks.find((task) => task.id === taskId);
+    const nowIso = new Date().toISOString();
+
     try {
-      await updatePlannedTask(taskId, { status: newStatus });
+      await updatePlannedTask(taskId, {
+        status: newStatus,
+        ...(newStatus === 'completed'
+          ? {
+              actual_start: existingTask?.actual_start || nowIso,
+              actual_end: nowIso,
+            }
+          : {}),
+      });
     } catch (error) {
       console.error('Failed to update task status:', error);
       toast.error('Failed to update task status');
     }
   };
 
-  const handleStartTask = async (taskId: string) => {
+  const handleStartTask = async (task: PlannedTask) => {
+    if (task.status === 'missed') {
+      toast.error('This task needs rescheduling before it can be started again.');
+      return;
+    }
+
+    // Open confirmation modal – the actual navigation happens in handleConfirmTaskStart
+    setTaskToConfirmStart(task);
+    // Close task details modal if open so the confirmation modal is clearly visible
+    if (selectedTask) setSelectedTask(null);
+  };
+
+  const handleConfirmTaskStart = async (context: StartContext) => {
+    const task = taskToConfirmStart;
+    if (!task) return;
+    setTaskToConfirmStart(null);
+
+    // Re-read latest task state in case the global missed-task watcher
+    // marked it missed while the confirmation modal was open.
+    const latest = useTaskStore.getState().plannedTasks.find((t) => t.id === task.id) || task;
+    if (latest.status === 'missed') {
+      toast.error('This task was just marked missed. Reschedule it before starting.');
+      return;
+    }
+    if (['completed', 'cancelled', 'skipped', 'in_progress'].includes(latest.status)) {
+      toast.error('This task can no longer be started from its current status.');
+      return;
+    }
+
     try {
-      await updatePlannedTask(taskId, {
+      await updatePlannedTask(latest.id, {
         status: 'in_progress',
         actual_start: new Date().toISOString(),
+        start_type: context.type,
+        minutes_offset: context.minutesOffset,
       });
     } catch (error) {
       console.error('Failed to start task:', error);
       toast.error('Failed to start task');
+      return;
     }
+
+    navigate(
+      buildFocusTaskUrl(latest, {
+        autoStart: true,
+        date: format(selectedDate, 'yyyy-MM-dd'),
+      })
+    );
   };
 
   const handleCompleteTask = async (taskId: string) => {
+    const existingTask = plannedTasks.find((task) => task.id === taskId);
+    const nowIso = new Date().toISOString();
+
     try {
       await updatePlannedTask(taskId, {
         status: 'completed',
-        actual_end: new Date().toISOString(),
+        actual_start: existingTask?.actual_start || nowIso,
+        actual_end: nowIso,
       });
     } catch (error) {
       console.error('Failed to complete task:', error);
@@ -209,6 +265,19 @@ export default function Schedule() {
   const progressPercent = plannedTasks.length > 0 
     ? Math.round((completedCount / plannedTasks.length) * 100)
     : 0;
+  const selectedTaskStatusBadge = selectedTask ? getTaskStatusBadge(selectedTask.status) : null;
+  const selectedTaskStartBadge = selectedTask ? getTaskStartBadge(selectedTask) : null;
+  const selectedTaskTimerBadge = selectedTask ? getTaskTimerBadge(selectedTask) : null;
+  const selectedTaskTimerReason = selectedTask ? getTaskTimerReason(selectedTask) : null;
+  const selectedTaskUserNotes = selectedTask ? getTaskUserNotes(selectedTask) : null;
+  const selectedTaskLifecycle = selectedTask
+    ? getTaskLifecycleTimeline(selectedTask, { includeDateTime: true })
+    : null;
+
+  useEffect(() => {
+    setIsNotesExpanded(false);
+    setCustomRescheduleOpen(false);
+  }, [selectedTask?.id]);
 
   return (
     <div className="space-y-6 h-full flex flex-col">
@@ -385,6 +454,16 @@ export default function Schedule() {
               const isCompleted = plannedTask.status === 'completed';
               const isInProgress = plannedTask.status === 'in_progress';
               const isMissed = plannedTask.status === 'missed';
+              const statusBadge = getTaskStatusBadge(plannedTask.status);
+              const startBadge = getTaskStartBadge(plannedTask);
+              const timerBadge = getTaskTimerBadge(plannedTask);
+              const userNotes = getTaskUserNotes(plannedTask);
+              const lifecycle = getTaskLifecycleTimeline(plannedTask);
+              const lifecycleParts = [
+                lifecycle.startedAt !== 'Not started' ? `Started ${lifecycle.startedAt}` : null,
+                lifecycle.endedAt !== 'Not finished' ? `Ended ${lifecycle.endedAt}` : null,
+                lifecycle.actualDuration ?? null,
+              ].filter(Boolean) as string[];
               const cognitiveType = taskDetails?.type || 'light_focus';
               const borderColor = isMissed ? 'border-orange-400' : cognitiveColors[cognitiveType] || 'border-blue-500';
               const bgColor = cognitiveBgColors[cognitiveType] || 'bg-blue-500/10';
@@ -414,24 +493,36 @@ export default function Schedule() {
 
                     {/* Status */}
                     <button
-                      onClick={() =>
+                      onClick={() => {
+                        // Missed tasks must go through the reschedule flow; the
+                        // round toggle would silently flip status and bypass it.
+                        if (isMissed) {
+                          toast.error('Reschedule this task before changing its status.');
+                          return;
+                        }
                         handleStatusChange(
                           plannedTask.id,
                           isCompleted ? 'pending' : 'completed'
-                        )
-                      }
+                        );
+                      }}
                       className={clsx(
                         'flex-shrink-0 mt-1 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors',
                         isCompleted
                           ? 'bg-green-500 border-green-500'
                           : isInProgress
                           ? 'border-blue-500'
+                          : isMissed
+                          ? 'border-orange-400 cursor-not-allowed'
                           : 'border-gray-400 hover:border-blue-500'
                       )}
+                      title={isMissed ? 'Reschedule this task before changing its status' : undefined}
                     >
                       {isCompleted && <CheckCircle2 className="w-4 h-4 text-white" />}
                       {isInProgress && (
                         <div className="w-3 h-3 rounded-full bg-blue-500 animate-pulse" />
+                      )}
+                      {isMissed && (
+                        <AlertTriangle className="w-3 h-3 text-orange-500" />
                       )}
                     </button>
 
@@ -455,9 +546,9 @@ export default function Schedule() {
                             {isMissed && <AlertTriangle className="w-4 h-4 inline mr-1 text-orange-500" />}
                             {plannedTask.task_name}
                           </h3>
-                          {plannedTask.notes && (
+                          {userNotes && (
                             <p className="text-sm text-gray-600 mt-1">
-                              💡 {plannedTask.notes}
+                              💡 {userNotes}
                             </p>
                           )}
                         </div>
@@ -476,7 +567,7 @@ export default function Schedule() {
                             <Button
                               variant="ghost"
                               size="sm"
-                              onClick={() => handleStartTask(plannedTask.id)}
+                              onClick={() => handleStartTask(plannedTask)}
                             >
                               <Play className="w-4 h-4" />
                             </Button>
@@ -537,11 +628,46 @@ export default function Schedule() {
                           <CognitiveLoadBadge type={taskDetails.type} />
                         )}
                         <PriorityBadge priority={plannedTask.priority} />
+                        <span
+                          className={clsx(
+                            'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium',
+                            getTaskBadgeClasses(statusBadge.tone)
+                          )}
+                        >
+                          {statusBadge.label}
+                        </span>
+                        {startBadge && (
+                          <span
+                            className={clsx(
+                              'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium',
+                              getTaskBadgeClasses(startBadge.tone)
+                            )}
+                          >
+                            {startBadge.label}
+                          </span>
+                        )}
+                        {timerBadge && (
+                          <span
+                            className={clsx(
+                              'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium',
+                              getTaskBadgeClasses(timerBadge.tone)
+                            )}
+                          >
+                            {timerBadge.label}
+                          </span>
+                        )}
                         <div className="flex items-center gap-1 text-xs text-dark-400">
                           <Clock className="w-3.5 h-3.5" />
-                          {plannedTask.suggested_duration}
+                          Planned {plannedTask.suggested_duration}
+                        </div>
+                        <div className="flex items-center gap-1 text-xs text-dark-400">
+                          <Calendar className="w-3.5 h-3.5" />
+                          {lifecycle.scheduledWindow}
                         </div>
                       </div>
+                      <p className="text-xs text-gray-500 mt-2">
+                        {lifecycleParts.length > 0 ? lifecycleParts.join(' • ') : lifecycle.completionState}
+                      </p>
                     </div>
                   </div>
                 </motion.div>
@@ -679,9 +805,10 @@ export default function Schedule() {
         <Modal 
           isOpen={!!selectedTask} 
           onClose={() => setSelectedTask(null)}
+          size="lg"
         >
-          <div className="bg-white rounded-apple-lg p-6 max-w-md w-full shadow-xl">
-            <div className="flex items-center justify-between mb-6">
+          <div className="max-h-[78vh] overflow-y-auto pr-1">
+            <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold text-gray-900">Task Details</h2>
               <button
                 onClick={() => setSelectedTask(null)}
@@ -691,87 +818,149 @@ export default function Schedule() {
               </button>
             </div>
 
-            <div className="space-y-4">
-              {/* Task Name */}
-              <div>
-                <label className="text-sm font-medium text-gray-600">Task Name</label>
-                <p className="text-gray-900 text-lg font-medium mt-1">{selectedTask.task_name}</p>
+            <div className="space-y-3">
+              <div className="flex items-start justify-between gap-3">
+                <span className="text-sm font-medium text-gray-600">Name:</span>
+                <p className="text-sm font-semibold text-gray-900 text-right break-words">{selectedTask.task_name}</p>
               </div>
 
               {/* Status */}
-              <div>
-                <label className="text-sm font-medium text-gray-600">Status</label>
-                <div className="mt-1">
-                  <span className={clsx(
-                    'inline-block px-3 py-1 rounded-full text-sm font-medium',
-                    selectedTask.status === 'completed' ? 'bg-green-500/20 text-green-600' :
-                    selectedTask.status === 'in_progress' ? 'bg-blue-500/20 text-blue-600' :
-                    selectedTask.status === 'missed' ? 'bg-orange-500/20 text-orange-600' :
-                    'bg-gray-200 text-gray-700'
-                  )}>
-                    {selectedTask.status === 'missed' ? '⚠ Missed' : selectedTask.status}
-                  </span>
+              <div className="flex items-start justify-between gap-3">
+                <span className="text-sm font-medium text-gray-600 pt-1">Status:</span>
+                <div className="flex flex-wrap justify-end gap-2">
+                  {selectedTaskStatusBadge && (
+                    <span
+                      className={clsx(
+                        'inline-flex items-center px-3 py-1 rounded-full text-sm font-medium',
+                        getTaskBadgeClasses(selectedTaskStatusBadge.tone)
+                      )}
+                    >
+                      {selectedTaskStatusBadge.label}
+                    </span>
+                  )}
+                  {selectedTaskStartBadge && (
+                    <span
+                      className={clsx(
+                        'inline-flex items-center px-3 py-1 rounded-full text-sm font-medium',
+                        getTaskBadgeClasses(selectedTaskStartBadge.tone)
+                      )}
+                    >
+                      {selectedTaskStartBadge.label}
+                    </span>
+                  )}
+                  {selectedTaskTimerBadge && (
+                    <span
+                      className={clsx(
+                        'inline-flex items-center px-3 py-1 rounded-full text-sm font-medium',
+                        getTaskBadgeClasses(selectedTaskTimerBadge.tone)
+                      )}
+                    >
+                      {selectedTaskTimerBadge.label}
+                    </span>
+                  )}
                 </div>
               </div>
 
+              {(selectedTaskTimerBadge || selectedTaskTimerReason) && (
+                <div className="rounded-apple border border-amber-200 bg-amber-50 p-3 space-y-1">
+                  <p className="text-sm text-amber-900">
+                    <span className="font-medium">Timer Result:</span> Timer went off for this task and it stays incomplete until you reschedule.
+                  </p>
+                  {selectedTaskTimerReason && (
+                    <p className="text-sm text-amber-900">
+                      <span className="font-medium">Reason:</span> {selectedTaskTimerReason}
+                    </p>
+                  )}
+                </div>
+              )}
+
               {/* Reschedule Actions for Missed Tasks */}
               {selectedTask.status === 'missed' && (
-                <div>
-                  <label className="text-sm font-medium text-gray-600 mb-2 block">Reschedule</label>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-gray-600 block">Reschedule:</label>
                   <div className="flex gap-2">
-                    <button
-                      onClick={() => { handleReschedule(selectedTask.id, 'next_slot'); setSelectedTask(null); }}
-                      disabled={rescheduleLoading === selectedTask.id}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-apple bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-50 transition-colors"
-                    >
-                      <RefreshCw className={clsx('w-3.5 h-3.5', rescheduleLoading === selectedTask.id && 'animate-spin')} />
-                      Next Slot
-                    </button>
-                    <button
-                      onClick={() => { handleReschedule(selectedTask.id, 'tomorrow'); setSelectedTask(null); }}
-                      disabled={rescheduleLoading === selectedTask.id}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-apple bg-purple-500 text-white hover:bg-purple-600 disabled:opacity-50 transition-colors"
-                    >
-                      <CalendarPlus className="w-3.5 h-3.5" />
-                      Tomorrow
-                    </button>
                     <button
                       onClick={() => { handleReschedule(selectedTask.id, 'skip'); setSelectedTask(null); }}
                       disabled={rescheduleLoading === selectedTask.id}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-apple bg-gray-200 text-gray-700 hover:bg-gray-300 disabled:opacity-50 transition-colors"
+                      className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-apple bg-gray-200 text-gray-700 hover:bg-gray-300 disabled:opacity-50 transition-colors"
                     >
                       <SkipForward className="w-3.5 h-3.5" />
                       Skip
                     </button>
+                    <button
+                      onClick={() => setCustomRescheduleOpen((v) => !v)}
+                      className={clsx(
+                        'flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-apple border transition-colors',
+                        customRescheduleOpen
+                          ? 'bg-blue-50 border-blue-300 text-blue-700'
+                          : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50'
+                      )}
+                    >
+                      <CalendarPlus className="w-3.5 h-3.5" />
+                      Pick a time
+                    </button>
                   </div>
+                  {customRescheduleOpen && (
+                    <ReschedulePanel
+                      task={selectedTask}
+                      onComplete={() => {
+                        setCustomRescheduleOpen(false);
+                        setSelectedTask(null);
+                      }}
+                    />
+                  )}
                 </div>
               )}
 
               {/* Priority */}
-              <div>
-                <label className="text-sm font-medium text-gray-600">Priority</label>
-                <div className="mt-1">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm font-medium text-gray-600">Priority:</span>
+                <div className="shrink-0">
                   <PriorityBadge priority={selectedTask.priority} />
                 </div>
               </div>
 
               {/* Duration */}
-              <div>
-                <label className="text-sm font-medium text-gray-600">Duration</label>
-                <p className="text-gray-900 mt-1">{selectedTask.suggested_duration}</p>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm font-medium text-gray-600">Duration:</span>
+                <p className="text-sm font-medium text-gray-900">{selectedTask.suggested_duration}</p>
               </div>
 
+              {/* Lifecycle Timeline */}
+              {selectedTaskLifecycle && (
+                <div className="rounded-apple border border-gray-200 bg-gray-50 p-3">
+                  <p className="text-sm font-medium text-gray-600">Task Timeline</p>
+                  <div className="mt-2 space-y-1.5">
+                    <p className="text-sm text-gray-900"><span className="text-gray-500">Scheduled Window:</span> {selectedTaskLifecycle.scheduledWindow}</p>
+                    <p className="text-sm text-gray-900"><span className="text-gray-500">Started:</span> {selectedTaskLifecycle.startedAt}</p>
+                    <p className="text-sm text-gray-900"><span className="text-gray-500">Ended:</span> {selectedTaskLifecycle.endedAt}</p>
+                    <p className="text-sm text-gray-900"><span className="text-gray-500">Current Outcome:</span> {selectedTaskLifecycle.completionState}</p>
+                  </div>
+                  {selectedTaskLifecycle.actualDuration && (
+                    <p className="text-xs text-gray-600 mt-2">Actual Duration: {selectedTaskLifecycle.actualDuration}</p>
+                  )}
+                </div>
+              )}
+
               {/* Notes */}
-              {selectedTask.notes && (
-                <div>
-                  <label className="text-sm font-medium text-gray-600">Notes</label>
-                  <p className="text-gray-900 mt-1">{selectedTask.notes}</p>
+              {selectedTaskUserNotes && (
+                <div className="rounded-apple border border-gray-200 bg-gray-50 p-3">
+                  <button
+                    onClick={() => setIsNotesExpanded((prev) => !prev)}
+                    className="w-full flex items-center justify-between text-sm font-medium text-gray-700"
+                  >
+                    <span>Notes</span>
+                    <span className="text-xs text-blue-600">{isNotesExpanded ? 'Hide' : 'Show'}</span>
+                  </button>
+                  {isNotesExpanded && (
+                    <p className="text-sm text-gray-900 mt-2 whitespace-pre-wrap break-words">{selectedTaskUserNotes}</p>
+                  )}
                 </div>
               )}
             </div>
 
             {/* Actions */}
-            <div className="flex gap-3 mt-6">
+            <div className="flex gap-3 mt-5 pt-1">
               <Button
                 variant="ghost"
                 onClick={() => setSelectedTask(null)}
@@ -779,6 +968,19 @@ export default function Schedule() {
               >
                 Close
               </Button>
+              {!['completed', 'skipped', 'cancelled', 'missed'].includes(selectedTask.status) && (
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    handleStartTask(selectedTask);
+                    setSelectedTask(null);
+                  }}
+                  className="flex-1 flex items-center justify-center gap-2"
+                >
+                  <Play className="w-4 h-4" />
+                  Start Focus
+                </Button>
+              )}
               <Button
                 variant="primary"
                 onClick={() => {
@@ -830,6 +1032,17 @@ export default function Schedule() {
             </div>
           </div>
         </Modal>
+      )}
+
+      {/* Task Start Confirmation Modal */}
+      {taskToConfirmStart && (
+        <TaskStartConfirmModal
+          isOpen={!!taskToConfirmStart}
+          task={taskToConfirmStart}
+          taskDate={format(selectedDate, 'yyyy-MM-dd')}
+          onConfirm={handleConfirmTaskStart}
+          onCancel={() => setTaskToConfirmStart(null)}
+        />
       )}
     </div>
   );

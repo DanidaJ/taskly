@@ -4,7 +4,6 @@ import { useUserProfileStore } from '@/stores/userProfileStore';
 import { useUserPatternsStore } from '@/stores/userPatternsStore';
 import Layout from '@/components/Layout';
 import Dashboard from '@/pages/Dashboard';
-import Tasks from '@/pages/Tasks';
 import Planner from '@/pages/Planner';
 import Schedule from '@/pages/Schedule';
 import Reflection from '@/pages/Reflection';
@@ -107,7 +106,6 @@ function App() {
           }
         >
           <Route index element={<Dashboard />} />
-          <Route path="tasks" element={<Tasks />} />
           <Route path="planner" element={<Planner />} />
           <Route path="schedule" element={<Schedule />} />
           <Route path="focus" element={<FocusTimer />} />

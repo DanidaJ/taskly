@@ -122,9 +122,10 @@ export async function ensureFcmTokenRegistered(authToken?: string | null): Promi
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (authToken) headers.Authorization = `Bearer ${authToken}`;
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
       await axios.post(
         `${API_URL}/api/v1/notifications/register`,
-        { token, device_hint: navigator.platform || 'web' },
+        { token, device_hint: navigator.platform || 'web', timezone },
         { headers }
       );
     } catch (e) {

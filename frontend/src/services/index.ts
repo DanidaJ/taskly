@@ -6,6 +6,7 @@ export {
   scheduleService,
   notificationService as backendNotificationService,
   focusSessionService,
+  activeFocusTimerService,
   sleepEntryService,
   dailyStatsService,
   recurringTaskService,

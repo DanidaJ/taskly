@@ -55,9 +55,13 @@ interface TaskStore {
   loadPlansForDateRange: (startDate: string, endDate: string) => Promise<void>;
 
   // Missed task handling
-  checkMissedTasks: () => void;
+  checkMissedTasks: () => Promise<void>;
   getMissedTasks: () => PlannedTask[];
-  rescheduleTask: (taskId: string, mode: 'next_slot' | 'tomorrow' | 'skip') => Promise<void>;
+  rescheduleTask: (
+    taskId: string,
+    mode: 'next_slot' | 'tomorrow' | 'skip' | 'custom',
+    options?: { date?: string; time?: string },
+  ) => Promise<void>;
 }
 
 export const useTaskStore = create<TaskStore>((set, get) => ({
@@ -124,6 +128,8 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       notes: updates.notes,
       scheduled_start: updates.scheduled_start,
       scheduled_end: updates.scheduled_end,
+      start_type: updates.start_type,
+      minutes_offset: updates.minutes_offset,
     });
 
     // Update local state after backend success
@@ -463,7 +469,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     }
   },
 
-  checkMissedTasks: () => {
+  checkMissedTasks: async () => {
     const state = get();
     const now = new Date();
     const todayStr = format(now, 'yyyy-MM-dd');
@@ -487,26 +493,69 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       return task;
     });
 
-    if (changed) {
-      const updatedPlan = { ...plan, tasks: updatedTasks };
-      const updatedPlansByDate = { ...state.plansByDate, [todayStr]: updatedPlan };
-      const allTasks: PlannedTask[] = [];
-      Object.values(updatedPlansByDate).forEach((p) => {
-        if (p.tasks) allTasks.push(...p.tasks);
-      });
-      set({
-        plansByDate: updatedPlansByDate,
-        plannedTasks: allTasks,
-        currentPlan: updatedPlan,
-      });
-      syncDailyTaskStats(todayStr, updatedTasks);
+    if (!changed) return;
 
-      missedTaskIds.forEach((taskId) => {
-        planService
-          .updateTask(plan.id, taskId, { status: 'missed' })
-          .catch((error) => console.error('Failed to persist missed status:', error));
-      });
-    }
+    const planId = plan.id;
+    const updatedPlan = { ...plan, tasks: updatedTasks };
+    const updatedPlansByDate = { ...state.plansByDate, [todayStr]: updatedPlan };
+    const allTasks: PlannedTask[] = [];
+    Object.values(updatedPlansByDate).forEach((p) => {
+      if (p.tasks) allTasks.push(...p.tasks);
+    });
+
+    // Optimistic local update so the UI reflects missed status immediately.
+    set({
+      plansByDate: updatedPlansByDate,
+      plannedTasks: allTasks,
+      currentPlan: updatedPlan,
+    });
+    syncDailyTaskStats(todayStr, updatedTasks);
+
+    // Persist in parallel, then roll back any tasks whose write failed —
+    // otherwise local state drifts from backend on the next page load.
+    const results = await Promise.allSettled(
+      missedTaskIds.map((taskId) =>
+        planService.updateTask(planId, taskId, { status: 'missed' }),
+      ),
+    );
+
+    const failedIds: string[] = [];
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        console.error('Failed to persist missed status:', result.reason);
+        failedIds.push(missedTaskIds[index]);
+      }
+    });
+
+    if (failedIds.length === 0) return;
+
+    // Roll back the failed tasks to pending locally so retries can happen.
+    const latest = get();
+    const currentPlan = latest.plansByDate[todayStr];
+    if (!currentPlan?.tasks) return;
+
+    const failedSet = new Set(failedIds);
+    const revertedTasks = currentPlan.tasks.map((t) =>
+      failedSet.has(t.id) && t.status === 'missed'
+        ? { ...t, status: 'pending' as const }
+        : t,
+    );
+    const revertedPlan = { ...currentPlan, tasks: revertedTasks };
+    const revertedPlansByDate = { ...latest.plansByDate, [todayStr]: revertedPlan };
+    const revertedAllTasks: PlannedTask[] = [];
+    Object.values(revertedPlansByDate).forEach((p) => {
+      if (p.tasks) revertedAllTasks.push(...p.tasks);
+    });
+
+    set({
+      plansByDate: revertedPlansByDate,
+      plannedTasks: revertedAllTasks,
+      currentPlan:
+        latest.currentPlan && latest.currentPlan.date === todayStr
+          ? revertedPlan
+          : latest.currentPlan,
+    });
+    syncDailyTaskStats(todayStr, revertedTasks);
   },
 
   getMissedTasks: () => {
@@ -516,9 +565,8 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     return plan?.tasks?.filter((t) => t.status === 'missed') || [];
   },
 
-  rescheduleTask: async (taskId, mode) => {
+  rescheduleTask: async (taskId, mode, options) => {
     const state = get();
-    const todayStr = format(new Date(), 'yyyy-MM-dd');
 
     // Find which plan contains this task
     let planId: string | undefined;
@@ -553,9 +601,21 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     }
 
     try {
-      const result = await planService.rescheduleTask(planId, taskId, mode === 'tomorrow' ? 'tomorrow' : 'next_slot');
+      const apiMode = mode === 'tomorrow' ? 'tomorrow' : mode === 'custom' ? 'custom' : 'next_slot';
+      const result = await planService.rescheduleTask(
+        planId,
+        taskId,
+        apiMode,
+        options?.date,
+        options?.time,
+      );
 
-      if (mode === 'tomorrow' && result.date !== taskDate) {
+      // Treat as cross-date move whenever the backend places the task on a
+      // different day than its current plan — covers 'tomorrow' AND 'custom'
+      // when the user picked a future date.
+      const isCrossDateMove = result.date && result.date !== taskDate;
+
+      if (isCrossDateMove) {
         // Move task to tomorrow's plan
         const task = state.plansByDate[taskDate]?.tasks?.find((t) => t.id === taskId);
         if (!task) return;
@@ -563,44 +623,40 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
         // Remove from today
         const todayPlan = state.plansByDate[taskDate];
         const todayTasks = todayPlan.tasks.filter((t) => t.id !== taskId);
-        const updatedTodayPlan = { ...todayPlan, tasks: todayTasks };
 
-        // Add to tomorrow
-        const tomorrowPlan = state.plansByDate[result.date] || {
-          id: '', user_id: '', date: result.date, tasks: [], is_ai_generated: false,
-          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-        };
-        const rescheduledTask = {
+        // Build tomorrow's task list with the rescheduled task appended.
+        // The synthetic id below is only a local placeholder; we replace state
+        // with the backend's response (which carries real DB ids) below.
+        const existingTomorrowPlan = state.plansByDate[result.date];
+        const rescheduledTaskDraft: PlannedTask = {
           ...task,
           id: `rescheduled-${Date.now()}`,
           scheduled_start: result.scheduled_start,
           scheduled_end: result.scheduled_end,
           status: 'pending' as const,
+          actual_start: undefined,
+          actual_end: undefined,
+          start_type: undefined,
+          minutes_offset: undefined,
           notes: `${task.notes || ''}\n(Rescheduled from ${taskDate})`.trim(),
         };
-        const tomorrowTasks = [...(tomorrowPlan.tasks || []), rescheduledTask];
-        const updatedTomorrowPlan = { ...tomorrowPlan, tasks: tomorrowTasks };
+        const tomorrowTasksDraft = [...(existingTomorrowPlan?.tasks || []), rescheduledTaskDraft];
 
-        const updatedPlansByDate = {
-          ...state.plansByDate,
-          [taskDate]: updatedTodayPlan,
-          [result.date]: updatedTomorrowPlan,
-        };
-
-        // Save tomorrow's plan
+        // Persist both plans and use the saved responses (with real DB ids).
+        let savedTomorrowPlan: DailyPlan | undefined;
         try {
-          await planService.save({
+          savedTomorrowPlan = await planService.save({
             date: result.date,
-            is_ai_generated: false,
-            tasks: tomorrowTasks,
+            is_ai_generated: existingTomorrowPlan?.is_ai_generated ?? false,
+            tasks: tomorrowTasksDraft,
           });
         } catch (e) {
           console.error('Failed to save rescheduled plan:', e);
         }
 
-        // Also save today's updated plan (task removed)
+        let savedTodayPlan: DailyPlan | undefined;
         try {
-          await planService.save({
+          savedTodayPlan = await planService.save({
             date: taskDate,
             is_ai_generated: todayPlan.is_ai_generated,
             tasks: todayTasks,
@@ -609,13 +665,46 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
           console.error('Failed to save updated today plan:', e);
         }
 
+        const finalTodayPlan: DailyPlan = savedTodayPlan ?? { ...todayPlan, tasks: todayTasks };
+        const finalTomorrowPlan: DailyPlan =
+          savedTomorrowPlan
+          ?? (existingTomorrowPlan
+            ? { ...existingTomorrowPlan, tasks: tomorrowTasksDraft }
+            : {
+                id: '',
+                user_id: '',
+                date: result.date,
+                tasks: tomorrowTasksDraft,
+                is_ai_generated: false,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              });
+
+        const updatedPlansByDate = {
+          ...state.plansByDate,
+          [taskDate]: finalTodayPlan,
+          [result.date]: finalTomorrowPlan,
+        };
+
         const allTasks: PlannedTask[] = [];
         Object.values(updatedPlansByDate).forEach((p) => {
           if (p.tasks) allTasks.push(...p.tasks);
         });
-        set({ plansByDate: updatedPlansByDate, plannedTasks: allTasks });
-        syncDailyTaskStats(taskDate, todayTasks);
-        syncDailyTaskStats(result.date, tomorrowTasks);
+
+        const updatedCurrentPlan =
+          state.currentPlan && state.currentPlan.date === taskDate
+            ? finalTodayPlan
+            : state.currentPlan && state.currentPlan.date === result.date
+              ? finalTomorrowPlan
+              : state.currentPlan;
+
+        set({
+          plansByDate: updatedPlansByDate,
+          plannedTasks: allTasks,
+          currentPlan: updatedCurrentPlan,
+        });
+        syncDailyTaskStats(taskDate, finalTodayPlan.tasks || todayTasks);
+        syncDailyTaskStats(result.date, finalTomorrowPlan.tasks || tomorrowTasksDraft);
       } else {
         // Reschedule to next slot today
         const plan = state.plansByDate[taskDate];
@@ -625,15 +714,18 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
             scheduled_start: result.scheduled_start,
             scheduled_end: result.scheduled_end,
             status: 'pending' as const,
+            actual_start: undefined,
+            actual_end: undefined,
+            start_type: undefined,
+            minutes_offset: undefined,
             notes: `${t.notes || ''}\n(Rescheduled)`.trim(),
           } : t
         );
-        const updatedPlan = { ...plan, tasks: updatedTasks };
-        const updatedPlansByDate = { ...state.plansByDate, [taskDate]: updatedPlan };
 
-        // Save to DB
+        // Persist and use the saved plan (with real DB ids) when available.
+        let savedPlan: DailyPlan | undefined;
         try {
-          await planService.save({
+          savedPlan = await planService.save({
             date: taskDate,
             is_ai_generated: plan.is_ai_generated,
             tasks: updatedTasks,
@@ -642,12 +734,25 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
           console.error('Failed to save rescheduled plan:', e);
         }
 
+        const finalPlan: DailyPlan = savedPlan ?? { ...plan, tasks: updatedTasks };
+        const updatedPlansByDate = { ...state.plansByDate, [taskDate]: finalPlan };
+
         const allTasks: PlannedTask[] = [];
         Object.values(updatedPlansByDate).forEach((p) => {
           if (p.tasks) allTasks.push(...p.tasks);
         });
-        set({ plansByDate: updatedPlansByDate, plannedTasks: allTasks });
-        syncDailyTaskStats(taskDate, updatedTasks);
+
+        const updatedCurrentPlan =
+          state.currentPlan && state.currentPlan.date === taskDate
+            ? finalPlan
+            : state.currentPlan;
+
+        set({
+          plansByDate: updatedPlansByDate,
+          plannedTasks: allTasks,
+          currentPlan: updatedCurrentPlan,
+        });
+        syncDailyTaskStats(taskDate, finalPlan.tasks || updatedTasks);
       }
     } catch (error: any) {
       console.error('Reschedule failed:', error?.message || error);

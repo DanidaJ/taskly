@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import {
   format,
@@ -47,24 +47,107 @@ interface CalendarViewProps {
   onEventClick?: (event: CalendarEvent) => void;
 }
 
-// Color mapping for cognitive types
-const cognitiveColors: Record<string, string> = {
-  deep_focus: 'bg-red-500',
-  light_focus: 'bg-blue-500',
-  admin: 'bg-yellow-500',
-  physical: 'bg-green-500',
-  recovery: 'bg-purple-500',
-};
+// Status colour palette — hues spread across the full wheel for max legibility.
+// Scheduled   blue-500   (#3b82f6)  0°→ blue
+// In Progress  amber-500  (#f59e0b)  ~45° warm amber — clearly "active/hot"
+// Rescheduled  violet-500 (#8b5cf6)  ~270° purple — "moved"
+// Completed    green-500  (#22c55e)  ~120° green — universally "done"
+// Missed       red-500    (#ef4444)  ~0° red — universally "error"
+// Skipped      sky-400    (#38bdf8)  ~200° light cyan — "skipped past"
+// Cancelled    stone-500  (#78716c)  warm brown-gray — "dead"
+// Commitment   slate-700  (#334155)  cool dark gray — "fixed/external"
+function getEventColor(event: CalendarEvent): string {
+  if (event.type === 'commitment') return 'bg-slate-700';
+  const status = event.status;
+  if (status === 'in_progress') return 'bg-amber-500';
+  if (status === 'completed')   return 'bg-green-500';
+  if (status === 'missed')      return 'bg-red-500';
+  if (status === 'skipped')     return 'bg-sky-400';
+  if (status === 'cancelled')   return 'bg-stone-500';
+  if (
+    status === 'pending' &&
+    event.plannedTask?.notes?.includes('(Rescheduled')
+  ) return 'bg-violet-500';
+  return 'bg-blue-500'; // scheduled / default pending
+}
 
-// Color mapping for priority
-const priorityColors: Record<string, string> = {
-  high: 'bg-red-500',
-  medium: 'bg-orange-500',
-  low: 'bg-green-500',
-};
+function getEventInlineStyle(event: CalendarEvent): React.CSSProperties {
+  if (event.status === 'missed') {
+    return {
+      backgroundImage:
+        'repeating-linear-gradient(135deg, transparent, transparent 4px, rgba(255,80,80,0.22) 4px, rgba(255,80,80,0.22) 8px)',
+    };
+  }
+  if (event.status === 'skipped') {
+    return {
+      backgroundImage:
+        'repeating-linear-gradient(135deg, transparent, transparent 6px, rgba(0,0,0,0.15) 6px, rgba(0,0,0,0.15) 12px)',
+    };
+  }
+  if (event.status === 'cancelled') {
+    return {
+      backgroundImage:
+        'repeating-linear-gradient(90deg, transparent, transparent 6px, rgba(0,0,0,0.2) 6px, rgba(0,0,0,0.2) 7px)',
+    };
+  }
+  return {};
+}
+
+function getEventStatusClasses(event: CalendarEvent): string {
+  if (event.status === 'completed')   return 'opacity-60';
+  if (event.status === 'missed')      return 'border-2 border-dashed border-red-300/80';
+  if (event.status === 'skipped')     return 'opacity-65';
+  if (event.status === 'cancelled')   return 'opacity-40';
+  if (event.status === 'in_progress') return 'ring-2 ring-amber-300/70 ring-offset-1 ring-offset-transparent';
+  return '';
+}
 
 // Hours to display (All 24 hours: 0-23)
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
+
+function getEventPrefix(event: CalendarEvent): string {
+  if (event.status === 'missed')    return '⚠ ';
+  if (event.status === 'completed') return '✓ ';
+  if (event.status === 'in_progress') return '▶ ';
+  if (event.status === 'skipped')   return '⊘ ';
+  if (event.status === 'cancelled') return '✕ ';
+  if (
+    event.status === 'pending' &&
+    event.plannedTask?.notes?.includes('(Rescheduled')
+  ) return '→ ';
+
+  if (event.type === 'task') {
+    if (event.plannedTask?.start_type === 'delayed') return '⏰ ';
+    if (event.plannedTask?.start_type === 'early') return '↗ ';
+    if (event.plannedTask?.start_type === 'on_time') return '• ';
+  }
+
+  return '';
+}
+
+function getEventStartContextLabel(event: CalendarEvent): string | null {
+  if (event.type !== 'task' || !event.plannedTask?.actual_start) {
+    return null;
+  }
+
+  const offset = typeof event.plannedTask.minutes_offset === 'number'
+    ? event.plannedTask.minutes_offset
+    : 0;
+
+  if (event.plannedTask.start_type === 'delayed') {
+    return offset > 0 ? `Expired start (${offset}m late)` : 'Expired start';
+  }
+
+  if (event.plannedTask.start_type === 'early') {
+    return offset < 0 ? `Early start (${Math.abs(offset)}m)` : 'Early start';
+  }
+
+  if (event.plannedTask.start_type === 'on_time') {
+    return 'On-time start';
+  }
+
+  return 'Started';
+}
 
 const addSplitEvent = (
   events: CalendarEvent[],
@@ -204,9 +287,6 @@ export default function CalendarView({
         const planDate = parseISO(dateStr);
 
         plan.tasks?.forEach((plannedTask) => {
-          const task = tasks.find((t) => t.id === plannedTask.task_id);
-          const cognitiveType = task?.type || 'light_focus';
-
           // Only display tasks that have been properly scheduled by the backend
           if (plannedTask.scheduled_start && plannedTask.scheduled_end) {
             const [startHour, startMin] = plannedTask.scheduled_start.split(':').map(Number);
@@ -224,8 +304,7 @@ export default function CalendarView({
                 id: plannedTask.id,
                 title: plannedTask.task_name,
                 type: 'task',
-                color: cognitiveColors[cognitiveType] || 'bg-blue-500',
-                cognitiveType,
+                color: 'bg-blue-500', // overridden by getEventColor at render time
                 priority: plannedTask.priority,
                 status: plannedTask.status,
                 plannedTask,
@@ -246,9 +325,6 @@ export default function CalendarView({
     } else {
       // Fallback: use plannedTasks directly (for backward compatibility)
       plannedTasks.forEach((plannedTask) => {
-        const task = tasks.find((t) => t.id === plannedTask.task_id);
-        const cognitiveType = task?.type || 'light_focus';
-
         if (plannedTask.scheduled_start && plannedTask.scheduled_end) {
           const today = new Date();
           const [startHour, startMin] = plannedTask.scheduled_start.split(':').map(Number);
@@ -266,8 +342,7 @@ export default function CalendarView({
               id: plannedTask.id,
               title: plannedTask.task_name,
               type: 'task',
-              color: cognitiveColors[cognitiveType] || 'bg-blue-500',
-              cognitiveType,
+              color: 'bg-blue-500', // overridden by getEventColor at render time
               priority: plannedTask.priority,
               status: plannedTask.status,
               plannedTask,
@@ -398,35 +473,22 @@ export default function CalendarView({
       </div>
 
       {/* Legend */}
-      <div className="mt-4 flex flex-wrap gap-4 text-xs text-dark-400">
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-red-500" />
-          <span>Deep Focus</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-blue-500" />
-          <span>Light Focus</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-yellow-500" />
-          <span>Admin</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-green-500" />
-          <span>Physical</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-purple-500" />
-          <span>Recovery</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-gray-500" />
-          <span>Commitment</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-orange-900 border border-dashed border-orange-400/60" />
-          <span>Missed</span>
-        </div>
+      <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-dark-400">
+        {[
+          { color: 'bg-blue-500',   label: 'Scheduled',   extra: '' },
+          { color: 'bg-amber-500',  label: 'In Progress', extra: 'ring-2 ring-amber-300/70' },
+          { color: 'bg-violet-500', label: 'Rescheduled', extra: '' },
+          { color: 'bg-green-500',  label: 'Completed',   extra: 'opacity-60' },
+          { color: 'bg-red-500',    label: 'Missed',      extra: 'border-2 border-dashed border-red-300/80' },
+          { color: 'bg-sky-400',    label: 'Skipped',     extra: 'opacity-65' },
+          { color: 'bg-stone-500',  label: 'Cancelled',   extra: 'opacity-40' },
+          { color: 'bg-slate-700',  label: 'Commitment',  extra: '' },
+        ].map(({ color, label, extra }) => (
+          <div key={label} className="flex items-center gap-1.5">
+            <div className={`w-3.5 h-3.5 rounded ${color} ${extra} flex-shrink-0`} />
+            <span>{label}</span>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -530,6 +592,7 @@ function WeekView({
             <div className="absolute inset-0 p-0.5">
               {getEventsForDay(day).map((event) => {
                 const style = getEventStyle(event);
+                const startContextLabel = getEventStartContextLabel(event);
                 return (
                   <motion.div
                     key={event.id}
@@ -537,26 +600,28 @@ function WeekView({
                     animate={{ opacity: 1, scale: 1 }}
                     className={clsx(
                       'absolute left-0.5 right-0.5 rounded-md px-1.5 py-0.5 overflow-hidden cursor-pointer',
-                      'hover:ring-2 hover:ring-white/20 transition-all',
-                      event.status === 'missed' ? 'bg-orange-900/80 border border-dashed border-orange-400/60' : event.color,
-                      event.status === 'completed' && 'opacity-50 line-through',
-                      event.status === 'missed' && 'opacity-75'
+                      'hover:brightness-110 transition-all',
+                      getEventColor(event),
+                      getEventStatusClasses(event),
                     )}
                     style={{
                       top: `${style.top}px`,
                       height: `${style.height}px`,
-                      ...(event.status === 'missed' ? {
-                        backgroundImage: 'repeating-linear-gradient(135deg, transparent, transparent 4px, rgba(251,146,60,0.15) 4px, rgba(251,146,60,0.15) 8px)',
-                      } : {}),
+                      ...getEventInlineStyle(event),
                     }}
                     onClick={() => onEventClick?.(event)}
                   >
                     <div className="text-xs font-medium text-white truncate">
-                      {event.status === 'missed' && '⚠ '}{event.title}
+                      {getEventPrefix(event)}{event.title}
                     </div>
                     <div className="text-[10px] text-white/70 truncate">
                       {event.startTime}-{event.endTime}
                     </div>
+                    {style.height > 38 && startContextLabel && (
+                      <div className="text-[10px] text-white/70 truncate">
+                        {startContextLabel}
+                      </div>
+                    )}
                     {style.height > 50 && (() => {
                       const totalMinutes = Math.round(style.height / 64 * 60);
                       const hours = Math.floor(totalMinutes / 60);
@@ -644,6 +709,7 @@ function DayView({
         <div className="absolute inset-0 p-1">
           {events.map((event) => {
             const style = getEventStyle(event);
+            const startContextLabel = getEventStartContextLabel(event);
             return (
               <motion.div
                 key={event.id}
@@ -651,22 +717,19 @@ function DayView({
                 animate={{ opacity: 1, x: 0 }}
                 className={clsx(
                   'absolute left-2 right-2 rounded-lg px-3 py-2 overflow-hidden cursor-pointer',
-                  'hover:ring-2 hover:ring-white/20 transition-all shadow-lg',
-                  event.status === 'missed' ? 'bg-orange-900/80 border border-dashed border-orange-400/60' : event.color,
-                  event.status === 'completed' && 'opacity-50 line-through',
-                  event.status === 'missed' && 'opacity-75'
+                  'hover:brightness-110 transition-all shadow-lg',
+                  getEventColor(event),
+                  getEventStatusClasses(event),
                 )}
                 style={{
                   top: `${style.top}px`,
                   height: `${style.height}px`,
-                  ...(event.status === 'missed' ? {
-                    backgroundImage: 'repeating-linear-gradient(135deg, transparent, transparent 4px, rgba(251,146,60,0.15) 4px, rgba(251,146,60,0.15) 8px)',
-                  } : {}),
+                  ...getEventInlineStyle(event),
                 }}
                 onClick={() => onEventClick?.(event)}
               >
                 <div className="text-sm font-semibold text-white truncate">
-                  {event.status === 'missed' && '⚠ '}{event.title}
+                  {getEventPrefix(event)}{event.title}
                 </div>
                 <div className="text-xs text-white/80 mt-0.5">
                   {(() => {
@@ -677,6 +740,11 @@ function DayView({
                     return `${event.startTime} - ${event.endTime} (${durationStr})`;
                   })()}
                 </div>
+                {style.height > 60 && startContextLabel && (
+                  <div className="text-xs text-white/75 mt-0.5 truncate">
+                    {startContextLabel}
+                  </div>
+                )}
                 {style.height > 60 && event.priority && (
                   <div className="mt-1">
                     <span className="text-xs bg-white/20 px-1.5 py-0.5 rounded">

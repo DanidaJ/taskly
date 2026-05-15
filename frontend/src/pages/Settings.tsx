@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import {
   Settings as SettingsIcon,
@@ -62,8 +62,40 @@ export default function Settings() {
   const [notificationsEnabled, setNotificationsEnabled] = useState(preferences?.notification_enabled ?? true);
   const [maxDailyHours, setMaxDailyHours] = useState(preferences?.max_daily_workload_hours || 8);
 
+  const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const timezoneOptions = useMemo(() => {
+    const fallback = [
+      'UTC',
+      'Asia/Colombo',
+      'Asia/Kolkata',
+      'Asia/Singapore',
+      'Asia/Tokyo',
+      'Europe/London',
+      'Europe/Berlin',
+      'America/New_York',
+      'America/Los_Angeles',
+      'Australia/Sydney',
+    ];
+    const supportedValuesOf = (Intl as any).supportedValuesOf;
+    const list = typeof supportedValuesOf === 'function'
+      ? supportedValuesOf.call(Intl, 'timeZone') as string[]
+      : fallback;
+    return Array.from(new Set([browserTimezone, 'UTC', ...list])).sort((a, b) => a.localeCompare(b));
+  }, [browserTimezone]);
+
+  const normalizeTimezone = (timezone?: string): string => {
+    const candidate = (timezone || '').trim();
+    if (candidate && timezoneOptions.includes(candidate)) {
+      return candidate;
+    }
+    if (timezoneOptions.includes(browserTimezone)) {
+      return browserTimezone;
+    }
+    return 'UTC';
+  };
+
   // Push notification settings (server-backed)
-  const DEFAULT_NOTIF_PREFS: NotificationPreferences = {
+  const defaultNotifPrefs = useMemo<NotificationPreferences>(() => ({
     enabled: true,
     task_reminders: true,
     break_reminders: true,
@@ -74,11 +106,11 @@ export default function Settings() {
     reminder_minutes_before: 15,
     quiet_hours_start: '22:00',
     quiet_hours_end: '08:00',
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    timezone: browserTimezone,
     daily_summary_time: '20:00',
     reflection_time: '20:30',
-  };
-  const [notifPrefs, setNotifPrefs] = useState<NotificationPreferences>(DEFAULT_NOTIF_PREFS);
+  }), [browserTimezone]);
+  const [notifPrefs, setNotifPrefs] = useState<NotificationPreferences>(defaultNotifPrefs);
   const [notifPermission, setNotifPermission] = useState<NotificationPermission | null>(null);
   const [pushSupported, setPushSupported] = useState<boolean>(true);
   const [savingNotif, setSavingNotif] = useState(false);
@@ -124,10 +156,18 @@ export default function Settings() {
       setNotifPermission(await getNotificationPermission());
       try {
         const prefs = await pushNotificationService.getPreferences();
-        setNotifPrefs(prefs);
+        const normalized: NotificationPreferences = {
+          ...defaultNotifPrefs,
+          ...prefs,
+          timezone: normalizeTimezone(prefs.timezone),
+        };
+        setNotifPrefs(normalized);
+        if ((prefs.timezone || '') !== normalized.timezone) {
+          await pushNotificationService.updatePreferences(normalized);
+        }
       } catch { /* keep defaults */ }
     })();
-  }, [activeTab]);
+  }, [activeTab, defaultNotifPrefs]);
 
   const saveNotifPrefs = async (next: NotificationPreferences) => {
     setSavingNotif(true);
@@ -142,7 +182,11 @@ export default function Settings() {
   };
 
   const updateNotif = (patch: Partial<NotificationPreferences>) => {
-    const next = { ...notifPrefs, ...patch };
+    const next = {
+      ...notifPrefs,
+      ...patch,
+      timezone: patch.timezone !== undefined ? normalizeTimezone(patch.timezone) : notifPrefs.timezone,
+    };
     setNotifPrefs(next);
     // debounce-light: persist on each change (small payload)
     saveNotifPrefs(next);
@@ -906,7 +950,17 @@ export default function Settings() {
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Timezone</label>
-                  <Input value={notifPrefs.timezone} onChange={(e) => updateNotif({ timezone: e.target.value })} />
+                  <select
+                    value={normalizeTimezone(notifPrefs.timezone)}
+                    onChange={(e) => updateNotif({ timezone: e.target.value })}
+                    className="w-full rounded-apple border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                  >
+                    {timezoneOptions.map((tz) => (
+                      <option key={tz} value={tz}>
+                        {tz === browserTimezone ? `${tz} (Current device)` : tz}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Quiet hours start</label>

@@ -78,6 +78,7 @@ async def _process_user_task_reminders(user_id: str):
     if not plan:
         return
     tasks = plan.get("planned_tasks") or []
+    fire_window = timedelta(minutes=5)
 
     for t in tasks:
         start_str = t.get("scheduled_start")
@@ -89,9 +90,11 @@ async def _process_user_task_reminders(user_id: str):
         if not start_t:
             continue
         start_dt = tz.localize(datetime.combine(now_local.date(), start_t))
+
+        # 1) "Starts in X minutes" reminder
         fire_at = start_dt - timedelta(minutes=minutes_before)
-        # Fire window: [fire_at, fire_at + 90s)
-        if fire_at <= now_local < fire_at + timedelta(seconds=90):
+        # Fire window: [fire_at, fire_at + 5m)
+        if minutes_before > 0 and fire_at <= now_local < fire_at + fire_window:
             dedupe = f"task_reminder:{t['id']}:{today_str}"
             await notification_service.send_to_user(
                 user_id=user_id,
@@ -103,6 +106,23 @@ async def _process_user_task_reminders(user_id: str):
                     "url": "/app/schedule",
                 },
                 dedupe_key=dedupe,
+            )
+
+        # 2) "Scheduled now" reminder at exact start time
+        if start_dt <= now_local < start_dt + fire_window:
+            dedupe_now = f"task_start:{t['id']}:{today_str}"
+            task_name = t.get("name", "Task")
+            await notification_service.send_to_user(
+                user_id=user_id,
+                title=f"Now: {task_name}",
+                body=f'You have "{task_name}" scheduled now.',
+                notif_type="task_reminder",
+                data={
+                    "task_id": str(t.get("id", "")),
+                    "url": "/app/schedule",
+                    "event": "task_start",
+                },
+                dedupe_key=dedupe_now,
             )
 
 

@@ -18,26 +18,65 @@ export function formatDuration(minutes: number): string {
 }
 
 export function parseDuration(duration: string): number {
-  const hoursMatch = duration.match(/(\d+)\s*h/i);
-  const minutesMatch = duration.match(/(\d+)\s*m/i);
-  
+  if (!duration) {
+    return 30;
+  }
+
+  const normalized = duration.trim().toLowerCase();
+  const hhmmMatch = normalized.match(/^(\d{1,2}):(\d{2})$/);
+  if (hhmmMatch) {
+    const hours = parseInt(hhmmMatch[1], 10);
+    const minutes = parseInt(hhmmMatch[2], 10);
+    return Math.max(1, hours * 60 + minutes);
+  }
+
   let totalMinutes = 0;
-  if (hoursMatch) {
-    totalMinutes += parseInt(hoursMatch[1]) * 60;
+  const hourMatches = [...normalized.matchAll(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b/g)];
+  const minuteMatches = [...normalized.matchAll(/(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|m)\b/g)];
+
+  hourMatches.forEach((match) => {
+    totalMinutes += Math.round(parseFloat(match[1]) * 60);
+  });
+  minuteMatches.forEach((match) => {
+    totalMinutes += Math.round(parseFloat(match[1]));
+  });
+
+  if (totalMinutes > 0) {
+    return Math.max(1, totalMinutes);
   }
-  if (minutesMatch) {
-    totalMinutes += parseInt(minutesMatch[1]);
+
+  const plainNumberMatch = normalized.match(/\d+(?:\.\d+)?/);
+  if (plainNumberMatch) {
+    return Math.max(1, Math.round(parseFloat(plainNumberMatch[0])));
   }
-  
-  // If no hours or minutes found, try parsing as plain number (minutes)
-  if (!hoursMatch && !minutesMatch) {
-    const plainNumber = parseInt(duration);
-    if (!isNaN(plainNumber)) {
-      return plainNumber;
-    }
+
+  return 30;
+}
+
+export function buildFocusTaskUrl(
+  task: { id: string; task_name?: string; suggested_duration?: string },
+  options?: { autoStart?: boolean; date?: string }
+): string {
+  const params = new URLSearchParams();
+  params.set('task', task.id);
+
+  if (task.suggested_duration) {
+    params.set('duration', task.suggested_duration);
   }
-  
-  return totalMinutes || 30; // Default to 30 minutes
+
+  if (task.task_name) {
+    params.set('taskName', task.task_name);
+  }
+
+  if (options?.date) {
+    params.set('date', options.date);
+  }
+
+  if (options?.autoStart ?? true) {
+    params.set('autostart', '1');
+  }
+
+  return `/app/focus?${params.toString()}`;
 }
 
 export function generateId(prefix: string = 'id'): string {

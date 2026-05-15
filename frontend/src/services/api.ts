@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { AIPlanRequest, AIPlanResponse, UserContext } from '@/types';
+import { broadcastTimerCleared, broadcastTimerSaved } from './timerBroadcast';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -191,6 +192,21 @@ export const planService = {
 };
 
 // Schedule API
+export interface BusyWindow {
+  start: string; // "HH:MM"
+  end: string;   // "HH:MM"
+  label: string;
+  kind: 'commitment' | 'task';
+  task_id?: string;
+}
+
+export interface FreeSlotsResponse {
+  date: string;
+  wake_time: string;        // "HH:MM"
+  sleep_deadline: string;   // "HH:MM"
+  busy_windows: BusyWindow[];
+}
+
 export const scheduleService = {
   async enforceTiming(plannedTasks: any[]) {
     const response = await api.post('/schedule/enforce', {
@@ -201,6 +217,15 @@ export const scheduleService = {
 
   async getTimeBlocks(date: string) {
     const response = await api.get(`/schedule/blocks/${date}`);
+    return response.data;
+  },
+
+  async getFreeSlots(date: string, excludeTaskId?: string): Promise<FreeSlotsResponse> {
+    const params = excludeTaskId ? { exclude_task_id: excludeTaskId } : undefined;
+    const response = await api.get<FreeSlotsResponse>(
+      `/plans/schedule/free-slots/${date}`,
+      { params },
+    );
     return response.data;
   },
 };
@@ -319,6 +344,40 @@ export const focusSessionService = {
       sessions,
     });
     return response.data;
+  },
+};
+
+export interface ActiveFocusTimer {
+  id?: string;
+  user_id?: string;
+  mode: 'focus' | 'shortBreak' | 'longBreak';
+  task_id: string | null;
+  task_name: string | null;
+  task_date: string | null;
+  is_running: boolean;
+  remaining_seconds: number;
+  total_seconds: number;
+  started_at: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export const activeFocusTimerService = {
+  async get(): Promise<ActiveFocusTimer | null> {
+    const response = await api.get('/data/active-focus-timer');
+    return response.data;
+  },
+
+  async save(timer: ActiveFocusTimer): Promise<ActiveFocusTimer> {
+    const response = await api.put('/data/active-focus-timer', timer);
+    // Notify other tabs so they don't drift / overwrite this state.
+    broadcastTimerSaved(response.data);
+    return response.data;
+  },
+
+  async clear(): Promise<void> {
+    await api.delete('/data/active-focus-timer');
+    broadcastTimerCleared();
   },
 };
 

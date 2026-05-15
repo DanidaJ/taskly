@@ -2,7 +2,6 @@ import { Outlet, NavLink, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard,
-  ListTodo,
   Sparkles,
   Calendar,
   BookOpen,
@@ -17,12 +16,14 @@ import {
 } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useAuthStore } from '@/stores/authStore';
+import { useTaskStore } from '@/stores';
 import { clsx } from 'clsx';
 import QuickCapture from './QuickCapture';
+import MiniFocusCountdown from './MiniFocusCountdown';
+import GlobalTimerCompletionPrompt from './GlobalTimerCompletionPrompt';
 
 const navigation = [
   { name: 'Dashboard', href: '/app', icon: LayoutDashboard },
-  { name: 'Tasks', href: '/app/tasks', icon: ListTodo },
   { name: 'AI Planner', href: '/app/planner', icon: Sparkles },
   { name: 'Schedule', href: '/app/schedule', icon: Calendar },
   { name: 'Focus Timer', href: '/app/focus', icon: Brain },
@@ -37,6 +38,7 @@ export default function Layout() {
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
   const { user, signOut } = useAuthStore();
   const location = useLocation();
+  const checkMissedTasks = useTaskStore((state) => state.checkMissedTasks);
 
   // Keyboard shortcut for quick capture
   useEffect(() => {
@@ -50,6 +52,22 @@ export default function Layout() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  // Globally enforce missed-task status everywhere in the app shell.
+  // Without this, a task whose scheduled window has passed could still be
+  // started from Dashboard/Focus until the user happens to open Schedule.
+  useEffect(() => {
+    checkMissedTasks();
+    const interval = setInterval(checkMissedTasks, 60000);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') checkMissedTasks();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [checkMissedTasks]);
 
   const handleSignOut = async () => {
     await signOut();
@@ -180,6 +198,8 @@ export default function Layout() {
         >
           <Plus className="w-6 h-6" />
         </button>
+
+        <MiniFocusCountdown />
       </div>
 
       {/* Quick Capture Modal */}
@@ -187,6 +207,10 @@ export default function Layout() {
         isOpen={quickCaptureOpen}
         onClose={() => setQuickCaptureOpen(false)}
       />
+
+      {/* App-global timer completion prompt: surfaces the mandatory yes/no
+          on every page so the user can't dodge it by leaving FocusTimer. */}
+      <GlobalTimerCompletionPrompt />
     </div>
   );
 }

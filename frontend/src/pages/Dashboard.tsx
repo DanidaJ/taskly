@@ -24,10 +24,15 @@ import { focusSessionService, sleepEntryService } from '@/services/api';
 import { useNavigate } from 'react-router-dom';
 import { useState, useEffect } from 'react';
 import { clsx } from 'clsx';
+import { buildFocusTaskUrl } from '@/utils';
+import { getTaskBadgeClasses, getTaskLifecycleTimeline, getTaskStartBadge, getTaskStatusBadge, getTaskTimerBadge } from '@/utils/taskLifecycle';
+import TaskStartConfirmModal, { getStartContext, StartContext } from '@/components/TaskStartConfirmModal';
+import { PlannedTask } from '@/types';
+import toast from 'react-hot-toast';
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { tasks, plannedTasks } = useTaskStore();
+  const { tasks, plansByDate, loadPlanFromDatabase, updatePlannedTask } = useTaskStore();
   const { energyProfile, sleepSchedule } = useUserProfileStore();
 
   // Get today's focus sessions
@@ -42,6 +47,11 @@ export default function Dashboard() {
     const yesterday = format(subDays(new Date(), 1), 'yyyy-MM-dd');
     const STREAK_LOOKBACK_DAYS = 90;
     const streakStart = format(subDays(new Date(), STREAK_LOOKBACK_DAYS - 1), 'yyyy-MM-dd');
+
+    // Always hydrate today's plan from backend on dashboard load.
+    loadPlanFromDatabase(todayDate).catch((error) => {
+      console.log('Dashboard plan load skipped:', error?.message || 'No plan available');
+    });
 
     // Today's focus minutes
     focusSessionService.getForDate(todayDate)
@@ -97,10 +107,7 @@ export default function Dashboard() {
     if (hour < 12) setGreeting('Good morning');
     else if (hour < 17) setGreeting('Good afternoon');
     else setGreeting('Good evening');
-
-    // Generate daily insight based on data
-    generateDailyInsight();
-  }, []);
+  }, [loadPlanFromDatabase]);
 
   const generateDailyInsight = () => {
     // Prioritized insights based on importance (not random)
@@ -139,10 +146,61 @@ export default function Dashboard() {
     setDailyInsight('Ready to make today productive?');
   };
 
+  const todayDateKey = format(new Date(), 'yyyy-MM-dd');
   const today = format(new Date(), 'EEEE, MMMM d');
-  const completedToday = plannedTasks.filter((t) => t.status === 'completed').length;
-  const totalToday = plannedTasks.length;
-  const pendingTasks = tasks.filter((t) => !plannedTasks.some((p) => p.task_id === t.id && p.status === 'completed'));
+  const todayPlannedTasks = plansByDate[todayDateKey]?.tasks || [];
+  const completedToday = todayPlannedTasks.filter((t) => t.status === 'completed').length;
+  const totalToday = todayPlannedTasks.length;
+  const pendingTasks = tasks.filter(
+    (t) => !todayPlannedTasks.some((p) => p.task_id === t.id && p.status === 'completed')
+  );
+
+  // Task start confirmation modal state
+  const [taskToStart, setTaskToStart] = useState<PlannedTask | null>(null);
+
+  const handleStartTaskFocus = (task: PlannedTask) => {
+    if (task.status === 'missed') {
+      toast.error('This task needs to be rescheduled before it can be started again.');
+      navigate('/app/schedule');
+      return;
+    }
+
+    setTaskToStart(task);
+  };
+
+  const handleConfirmStart = (context: StartContext) => {
+    if (!taskToStart) return;
+    const task = taskToStart;
+    setTaskToStart(null);
+
+    // Re-check latest task state — the global missed-task watcher may have
+    // flipped it to missed while the confirmation modal was open.
+    const latest = useTaskStore.getState().plannedTasks.find((t) => t.id === task.id) || task;
+    if (latest.status === 'missed') {
+      toast.error('This task was just marked missed. Reschedule it before starting.');
+      navigate('/app/schedule');
+      return;
+    }
+    if (['completed', 'cancelled', 'skipped', 'in_progress'].includes(latest.status)) {
+      toast.error('This task can no longer be started from its current status.');
+      return;
+    }
+
+    updatePlannedTask(latest.id, {
+      status: 'in_progress',
+      actual_start: new Date().toISOString(),
+      start_type: context.type,
+      minutes_offset: context.minutesOffset,
+    }).catch((error) => {
+      console.error('Failed to mark task in progress:', error);
+    });
+
+    navigate(buildFocusTaskUrl(latest, { autoStart: true, date: todayDateKey }));
+  };
+
+  useEffect(() => {
+    generateDailyInsight();
+  }, [lastNightSleep, streak, focusMinutes, pendingTasks.length]);
 
   const stats = [
     {
@@ -275,57 +333,106 @@ export default function Dashboard() {
             </Button>
           </div>
 
-          {plannedTasks.length > 0 ? (
+          {todayPlannedTasks.length > 0 ? (
             <div className="space-y-3">
-              {plannedTasks.slice(0, 5).map((task, index) => (
-                <motion.div
-                  key={task.id}
-                  initial={{ opacity: 0, x: -20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: index * 0.05 }}
-                  className="flex items-center gap-3 p-3 rounded-apple bg-gray-50 hover:bg-gray-100 transition-colors group"
-                >
-                  <div
-                    className={`w-2 h-2 rounded-full ${task.status === 'completed'
-                      ? 'bg-green-500'
-                      : task.status === 'in_progress'
-                        ? 'bg-amber-500'
-                        : 'bg-gray-400'
-                      }`}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <p
-                      className={`text-sm font-medium truncate ${task.status === 'completed'
-                        ? 'text-gray-500 line-through'
-                        : 'text-gray-900'
+              {todayPlannedTasks.slice(0, 5).map((task, index) => {
+                const statusBadge = getTaskStatusBadge(task.status);
+                const startBadge = getTaskStartBadge(task);
+                const timerBadge = getTaskTimerBadge(task);
+                const lifecycle = getTaskLifecycleTimeline(task);
+                const lifecycleParts = [
+                  lifecycle.startedAt !== 'Not started' ? `Started ${lifecycle.startedAt}` : null,
+                  lifecycle.endedAt !== 'Not finished' ? `Ended ${lifecycle.endedAt}` : null,
+                  lifecycle.actualDuration ?? null,
+                ].filter(Boolean) as string[];
+
+                return (
+                  <motion.div
+                    key={task.id}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: index * 0.05 }}
+                    className="flex items-start gap-3 p-3 rounded-apple bg-gray-50 hover:bg-gray-100 transition-colors group"
+                  >
+                    <div
+                      className={`w-2 h-2 rounded-full mt-1.5 ${task.status === 'completed'
+                        ? 'bg-green-500'
+                        : task.status === 'in_progress'
+                          ? 'bg-blue-500'
+                          : task.status === 'missed'
+                            ? 'bg-orange-500'
+                            : 'bg-gray-400'
+                        }`}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p
+                          className={`text-sm font-medium truncate max-w-[220px] ${task.status === 'completed'
+                            ? 'text-gray-500 line-through'
+                            : 'text-gray-900'
+                            }`}
+                        >
+                          {task.task_name}
+                        </p>
+                        <span
+                          className={clsx(
+                            'inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium',
+                            getTaskBadgeClasses(statusBadge.tone)
+                          )}
+                        >
+                          {statusBadge.label}
+                        </span>
+                        {startBadge && (
+                          <span
+                            className={clsx(
+                              'inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium',
+                              getTaskBadgeClasses(startBadge.tone)
+                            )}
+                          >
+                            {startBadge.label}
+                          </span>
+                        )}
+                        {timerBadge && (
+                          <span
+                            className={clsx(
+                              'inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium',
+                              getTaskBadgeClasses(timerBadge.tone)
+                            )}
+                          >
+                            {timerBadge.label}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-gray-600 mt-1">
+                        Window {lifecycle.scheduledWindow} • Planned {task.suggested_duration}
+                      </p>
+                      <p className="text-[11px] text-gray-500 mt-0.5">
+                        {lifecycleParts.length > 0 ? lifecycleParts.join(' • ') : lifecycle.completionState}
+                      </p>
+                    </div>
+                    <span
+                      className={`text-xs px-2 py-0.5 rounded-full mt-0.5 ${task.priority === 'high'
+                        ? 'bg-red-500/20 text-red-600'
+                        : task.priority === 'medium'
+                          ? 'bg-amber-500/20 text-amber-600'
+                          : 'bg-green-500/20 text-green-600'
                         }`}
                     >
-                      {task.task_name}
-                    </p>
-                    <p className="text-xs text-gray-600">{task.suggested_duration}</p>
-                  </div>
-                  <span
-                    className={`text-xs px-2 py-0.5 rounded-full ${task.priority === 'high'
-                      ? 'bg-red-500/20 text-red-600'
-                      : task.priority === 'medium'
-                        ? 'bg-amber-500/20 text-amber-600'
-                        : 'bg-green-500/20 text-green-600'
-                      }`}
-                  >
-                    {task.priority}
-                  </span>
-                  {/* Quick Focus Button */}
-                  {task.status !== 'completed' && (
-                    <button
-                      onClick={() => navigate(`/app/focus?task=${task.id}`)}
-                      className="opacity-0 group-hover:opacity-100 p-2 rounded-apple bg-blue-500/20 text-blue-600 hover:bg-blue-500/30 transition-all"
-                      title="Start Focus Session"
-                    >
-                      <Play className="w-4 h-4" />
-                    </button>
-                  )}
-                </motion.div>
-              ))}
+                      {task.priority}
+                    </span>
+                    {/* Quick Focus Button */}
+                    {!['completed', 'cancelled', 'skipped', 'missed'].includes(task.status) && (
+                      <button
+                        onClick={() => handleStartTaskFocus(task)}
+                        className="opacity-0 group-hover:opacity-100 p-2 rounded-apple bg-blue-500/20 text-blue-600 hover:bg-blue-500/30 transition-all"
+                        title="Start Focus Session"
+                      >
+                        <Play className="w-4 h-4" />
+                      </button>
+                    )}
+                  </motion.div>
+                );
+              })}
             </div>
           ) : (
             <div className="text-center py-8">
@@ -402,6 +509,17 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      {/* Task Start Confirmation Modal */}
+      {taskToStart && (
+        <TaskStartConfirmModal
+          isOpen={!!taskToStart}
+          task={taskToStart}
+          taskDate={todayDateKey}
+          onConfirm={handleConfirmStart}
+          onCancel={() => setTaskToStart(null)}
+        />
+      )}
     </div>
   );
 }

@@ -255,6 +255,8 @@ class NotificationService:
         sent = 0
         for token in tokens:
             try:
+                event = str((data or {}).get("event", "")).strip()
+                notif_tag = f"{notif_type}:{event}" if event else notif_type
                 https_link = self._get_https_link(data)
                 webpush_config = messaging.WebpushConfig(
                     notification=messaging.WebpushNotification(
@@ -262,7 +264,7 @@ class NotificationService:
                         body=body,
                         icon="/icons/icon-192x192.png",
                         badge="/icons/icon-72x72.png",
-                        tag=notif_type,
+                        tag=notif_tag,
                     ),
                     fcm_options=messaging.WebpushFCMOptions(link=https_link) if https_link else None,
                 )

@@ -522,6 +522,18 @@ async def update_task_status(
         if "scheduled_end" in payload:
             db_updates["scheduled_end"] = payload["scheduled_end"]
 
+        # Build start-timing metadata for the audit log
+        start_timing_meta: dict = {}
+        if "start_type" in payload and payload["start_type"]:
+            start_timing_meta["start_type"] = payload["start_type"]
+        if "minutes_offset" in payload and payload["minutes_offset"] is not None:
+            start_timing_meta["minutes_offset"] = payload["minutes_offset"]
+            # Convenience fields for analytics queries
+            if payload["minutes_offset"] < 0:
+                start_timing_meta["minutes_early"] = abs(payload["minutes_offset"])
+            elif payload["minutes_offset"] > 0:
+                start_timing_meta["minutes_late"] = payload["minutes_offset"]
+
         updated = await db.update_planned_task(task_id, db_updates)
         if not updated:
             raise HTTPException(
@@ -544,7 +556,7 @@ async def update_task_status(
             "scheduled_end": updated.get("scheduled_end", existing_task.get("scheduled_end")),
             "actual_start": updated.get("actual_start", existing_task.get("actual_start")),
             "actual_end": updated.get("actual_end", existing_task.get("actual_end")),
-            "metadata": {"api_payload": payload},
+            "metadata": {**start_timing_meta, "api_payload": payload},
             "created_at": datetime.utcnow().isoformat(),
         })
 
@@ -637,27 +649,16 @@ async def reschedule_task(
     
     user_id = current_user["user_id"]
     
-    # Look up the task to get its duration
+    # Look up the task (using the plan_id from the URL) to get its duration
     task_duration = 30  # default
     if db:
-        existing_plan = await db.get_daily_plan(user_id, datetime.now().strftime('%Y-%m-%d'))
-        if existing_plan:
-            for t in existing_plan.get("planned_tasks", []):
+        source_plan = await db.get_daily_plan_by_id(plan_id, user_id)
+        if source_plan:
+            for t in source_plan.get("planned_tasks", []):
                 if t["id"] == task_id:
                     task_duration = t.get("estimated_minutes", 30)
                     break
-    
-    # "Now" mode: just use the current time, no slot-finding needed
-    if mode == "next_slot":
-        now = datetime.now()
-        new_start = now.strftime('%H:%M')
-        new_end = (now + timedelta(minutes=task_duration)).strftime('%H:%M')
-        return {
-            "scheduled_start": new_start,
-            "scheduled_end": new_end,
-            "date": now.strftime('%Y-%m-%d'),
-        }
-    
+
     # Get user profile for scheduling
     energy_profile_data = await db.get_energy_profile(user_id) if db else None
     sleep_schedule_data = await db.get_sleep_schedule(user_id) if db else None
@@ -690,12 +691,60 @@ async def reschedule_task(
                 ))
     
     if mode == "custom" and custom_time:
-        new_start = custom_time
-        # Parse duration from task to calculate end
-        # We'll need to look up the task
-        hours_match = _re.search(r'(\d+)', custom_time.replace(":", ""))
-        return {"scheduled_start": custom_time, "scheduled_end": None, "date": target_date}
-    
+        # Validate HH:MM format
+        if not _re.match(r'^\d{2}:\d{2}$', custom_time):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="time must be HH:MM",
+            )
+        try:
+            new_start_dt = datetime.strptime(f"{target_date} {custom_time}", '%Y-%m-%d %H:%M')
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="invalid date/time combination",
+            )
+        # Refuse past times for today
+        now = datetime.now()
+        if target_date == now.strftime('%Y-%m-%d') and new_start_dt <= now:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="cannot reschedule to a past time",
+            )
+        new_end_dt = new_start_dt + timedelta(minutes=task_duration)
+        # Check overlap with existing tasks (already excludes this task by id above)
+        for et in existing_tasks:
+            try:
+                et_start = datetime.strptime(f"{target_date} {et.scheduled_start}", '%Y-%m-%d %H:%M')
+                et_end = datetime.strptime(f"{target_date} {et.scheduled_end}", '%Y-%m-%d %H:%M')
+            except (ValueError, TypeError):
+                continue
+            if new_start_dt < et_end and new_end_dt > et_start:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"overlaps with existing task at {et.scheduled_start}",
+                )
+        # Check overlap with commitments
+        day_of_week = (new_start_dt.weekday() + 1) % 7
+        for c in commitments_list:
+            if day_of_week not in c.days_of_week:
+                continue
+            try:
+                c_start = datetime.strptime(f"{target_date} {normalize_time_format(c.start_time)}", '%Y-%m-%d %H:%M')
+                c_end = datetime.strptime(f"{target_date} {normalize_time_format(c.end_time)}", '%Y-%m-%d %H:%M')
+            except (ValueError, TypeError):
+                continue
+            if new_start_dt < c_end and new_end_dt > c_start:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"overlaps with commitment '{c.name}'",
+                )
+        return {
+            "scheduled_start": new_start_dt.strftime('%H:%M'),
+            "scheduled_end": new_end_dt.strftime('%H:%M'),
+            "date": target_date,
+        }
+
     # Find available slots
     if sleep_schedule and energy_profile:
         available_slots = schedule_service.get_available_time_slots(
@@ -747,6 +796,89 @@ async def reschedule_task(
         "scheduled_start": new_start,
         "scheduled_end": new_end,
         "date": target_date,
+    }
+
+
+@router.get("/schedule/free-slots/{target_date}")
+async def get_free_slots(
+    target_date: str,
+    exclude_task_id: str | None = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return day boundaries + busy windows for a date so the frontend can
+    render a slot picker for rescheduling.
+
+    Query params:
+      - exclude_task_id: optional planned-task id to omit from busy_windows
+        (so a task being rescheduled doesn't block its own current slot)
+    """
+    user_id = current_user["user_id"]
+
+    # Day boundaries: prefer the user's sleep schedule, fall back to 08:00–22:00
+    wake_time_str = "08:00"
+    sleep_deadline_str = "22:00"
+    sleep_schedule_data = await db.get_sleep_schedule(user_id) if db else None
+    sleep_schedule = SleepSchedule(**sleep_schedule_data) if sleep_schedule_data else None
+    if sleep_schedule:
+        wake_time_str = normalize_time_format(sleep_schedule.wake_time) or wake_time_str
+        try:
+            deadline_dt = schedule_service.calculate_sleep_deadline(sleep_schedule, target_date)
+            sleep_deadline_str = deadline_dt.strftime('%H:%M')
+        except Exception:
+            pass
+
+    busy_windows: list[dict] = []
+
+    # Commitments for this day-of-week
+    commitments_data = await db.get_commitments(user_id) if db else []
+    try:
+        day_of_week = (datetime.strptime(target_date, '%Y-%m-%d').weekday() + 1) % 7
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="target_date must be YYYY-MM-DD",
+        )
+    for c in commitments_data or []:
+        if day_of_week in (c.get('days_of_week') or []):
+            c_start = normalize_time_format(c.get('start_time'))
+            c_end = normalize_time_format(c.get('end_time'))
+            if c_start and c_end:
+                busy_windows.append({
+                    "start": c_start,
+                    "end": c_end,
+                    "label": c.get('name', 'Commitment'),
+                    "kind": "commitment",
+                })
+
+    # Tasks already scheduled on this date
+    if db:
+        try:
+            existing_plan = await db.get_daily_plan(user_id, target_date)
+        except Exception:
+            existing_plan = None
+        if existing_plan:
+            for t in existing_plan.get('planned_tasks', []) or []:
+                if exclude_task_id and t.get('id') == exclude_task_id:
+                    continue
+                # Cancelled/skipped tasks no longer hold their slot
+                if t.get('status') in ('postponed', 'skipped'):
+                    continue
+                t_start = normalize_time_format(t.get('scheduled_start'))
+                t_end = normalize_time_format(t.get('scheduled_end'))
+                if t_start and t_end:
+                    busy_windows.append({
+                        "start": t_start,
+                        "end": t_end,
+                        "label": t.get('name', 'Task'),
+                        "kind": "task",
+                        "task_id": t.get('id'),
+                    })
+
+    return {
+        "date": target_date,
+        "wake_time": wake_time_str,
+        "sleep_deadline": sleep_deadline_str,
+        "busy_windows": busy_windows,
     }
 
 

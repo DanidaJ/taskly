@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
+import pytz
 
 from app.core.config import settings
 from app.core.security import get_current_user
@@ -14,6 +15,7 @@ router = APIRouter(prefix="/notifications", tags=["Notifications"])
 class TokenRegistration(BaseModel):
     token: str
     device_hint: Optional[str] = None
+    timezone: Optional[str] = None
 
 
 class TokenUnregister(BaseModel):
@@ -34,6 +36,15 @@ class NotificationPreferences(BaseModel):
     timezone: str = "UTC"
     daily_summary_time: str = "20:00"
     reflection_time: str = "20:30"
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        try:
+            pytz.timezone(value)
+        except Exception as exc:
+            raise ValueError("Invalid timezone. Use a valid IANA timezone like 'Asia/Colombo'.") from exc
+        return value
 
 
 class TestNotificationPayload(BaseModel):
@@ -77,6 +88,31 @@ async def register_fcm_token(
         device_hint=payload.device_hint,
         user_agent=user_agent,
     )
+
+    # If client provides a valid timezone, ensure preferences have one.
+    # This prevents scheduler drift for users who enabled notifications but
+    # never opened notification settings.
+    tz_from_client = (payload.timezone or "").strip()
+    if tz_from_client:
+        try:
+            pytz.timezone(tz_from_client)
+        except Exception:
+            tz_from_client = ""
+
+    if tz_from_client:
+        existing_prefs = await db.get_notification_preferences(current_user["user_id"])
+        if not existing_prefs:
+            await db.save_notification_preferences({
+                "user_id": current_user["user_id"],
+                "timezone": tz_from_client,
+            })
+        elif not (existing_prefs.get("timezone") or "").strip():
+            await db.save_notification_preferences({
+                **existing_prefs,
+                "user_id": current_user["user_id"],
+                "timezone": tz_from_client,
+            })
+
     return {"success": bool(saved), "message": "Token registered"}
 
 

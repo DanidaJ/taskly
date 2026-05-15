@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plus, X, Send, Clock, Flag } from 'lucide-react';
-import { Button, Input } from '@/components/ui';
+import { Plus, X, Send } from 'lucide-react';
+import { DatePicker, TimePicker } from '@/components/ui';
 import { useTaskStore } from '@/stores';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
@@ -21,7 +21,7 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
   const [scheduledTime, setScheduledTime] = useState(() => format(new Date(), 'HH:mm'));
 
   const inputRef = useRef<HTMLInputElement>(null);
-  const { addTask, setPlannedTasks, plannedTasks, currentPlan, loadPlanFromDatabase, plansByDate } = useTaskStore();
+  const { currentPlan, plansByDate, loadPlanFromDatabase } = useTaskStore();
 
   // Focus input when opened
   useEffect(() => {
@@ -71,7 +71,8 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
       const today = dueDate; // Use selected due date
 
       // Get existing tasks for THIS date only (not all tasks in store)
-      const existingTasksForDate = currentPlan?.date === today ? plannedTasks : [];
+      const existingTasksForDate = plansByDate[today]?.tasks ||
+        (currentPlan?.date === today ? currentPlan.tasks || [] : []);
 
       const plannedTaskEntry = {
         id: `planned-${Date.now()}`,
@@ -97,17 +98,21 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
 
       // Update state immediately with the saved plan for instant UI update
       if (savedPlan) {
-        // Update the main plannedTasks state
-        setPlannedTasks(savedPlan.tasks);
-
-        // Also update plansByDate for calendar view
-        useTaskStore.setState((state) => ({
-          currentPlan: savedPlan,
-          plansByDate: {
+        // Update plansByDate and rebuild plannedTasks from all loaded plans.
+        useTaskStore.setState((state) => {
+          const updatedPlansByDate = {
             ...state.plansByDate,
             [today]: savedPlan,
-          },
-        }));
+          };
+
+          const allTasks = Object.values(updatedPlansByDate).flatMap((plan) => plan.tasks || []);
+
+          return {
+            currentPlan: savedPlan,
+            plansByDate: updatedPlansByDate,
+            plannedTasks: allTasks,
+          };
+        });
       } else {
         // Fallback: reload from database if save didn't return the plan
         await loadPlanFromDatabase(today);
@@ -161,9 +166,9 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
             exit={{ opacity: 0, y: -20, scale: 0.95 }}
             className="fixed top-[20%] left-1/2 -translate-x-1/2 w-full max-w-xl z-50 px-4"
           >
-            <div className="bg-dark-800 border border-dark-600 rounded-xl shadow-2xl overflow-hidden">
+            <div className="bg-dark-800/80 backdrop-blur-xl border border-dark-600/60 rounded-xl shadow-2xl overflow-visible">
               {/* Header */}
-              <div className="flex items-center justify-between px-4 py-3 border-b border-dark-700">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-dark-700/60">
                 <div className="flex items-center gap-2">
                   <Plus className="w-5 h-5 text-primary-400" />
                   <span className="font-medium text-dark-100">Add Task</span>
@@ -195,7 +200,7 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
                       value={taskName}
                       onChange={(e) => setTaskName(e.target.value)}
                       placeholder="Enter task name..."
-                      className="w-full bg-white border border-gray-300 rounded-lg px-4 py-2 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      className="w-full h-11 bg-white border border-gray-300 rounded-lg px-4 py-2 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                     />
                   </div>
 
@@ -210,7 +215,7 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
                       max="480"
                       value={duration}
                       onChange={(e) => setDuration(e.target.value)}
-                      className="w-full bg-white border border-gray-300 rounded-lg px-4 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      className="w-full h-11 bg-white border border-gray-300 rounded-lg px-4 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                     />
                   </div>
 
@@ -244,32 +249,22 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
 
                   {/* Due Date */}
                   <div>
-                    <label className="block text-sm font-medium text-gray-600 mb-2">
-                      Due Date (Optional)
-                    </label>
-                    <input
-                      type="date"
+                    <DatePicker
+                      label="Due Date (Optional)"
                       value={dueDate}
-                      onChange={(e) => setDueDate(e.target.value)}
-                      className="w-full bg-white border border-gray-300 rounded-lg px-4 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      onChange={setDueDate}
                     />
+                    <p className="mt-1 text-xs text-gray-500">Use date shortcuts or press Arrow Up/Down to jump days, Shift+Arrow for weeks.</p>
                   </div>
 
                   {/* Scheduled Time */}
                   <div>
-                    <label className="block text-sm font-medium text-gray-600 mb-2">
-                      <div className="flex items-center gap-2">
-                        <Clock className="w-4 h-4" />
-                        Scheduled Time (Optional)
-                      </div>
-                    </label>
-                    <input
-                      type="time"
+                    <TimePicker
+                      label="Scheduled Time (Optional)"
                       value={scheduledTime}
-                      onChange={(e) => setScheduledTime(e.target.value)}
-                      className="w-full bg-white border border-gray-300 rounded-lg px-4 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      onChange={setScheduledTime}
                     />
-                    <p className="text-xs text-gray-500 mt-1">Set a specific time to schedule when this task should be done</p>
+                    <p className="text-xs text-gray-500 mt-1">Use hour/minute +/- controls and AM/PM toggle, or type exact values in each field.</p>
                   </div>
                 </div>
 
