@@ -8,7 +8,6 @@ import {
   CheckCircle2,
   Target,
   Zap,
-  Calendar,
   Brain,
   Coffee,
   ChevronLeft,
@@ -16,12 +15,16 @@ import {
   Flame,
   Moon,
   Sparkles,
-  ArrowRight,
   AlertTriangle,
   ShieldCheck,
+  Timer,
+  Hourglass,
+  XCircle,
 } from 'lucide-react';
 import { Button } from '@/components/ui';
 import { useTaskStore } from '@/stores';
+import { parseDuration } from '@/utils';
+import type { PlannedTask } from '@/types';
 import {
   format,
   startOfWeek,
@@ -30,7 +33,6 @@ import {
   subDays,
   subWeeks,
   addWeeks,
-  isSameDay,
   parseISO,
   differenceInMinutes,
 } from 'date-fns';
@@ -65,13 +67,13 @@ interface SleepEntry {
 export default function Analytics() {
   const navigate = useNavigate();
   const [selectedWeek, setSelectedWeek] = useState(new Date());
-  const [viewMode, setViewMode] = useState<'week' | 'month'>('week');
-  const { tasks, plannedTasks } = useTaskStore();
+  const { plansByDate, loadPlansForDateRange } = useTaskStore();
 
   // Backend-synced data caches
   const [backendFocusData, setBackendFocusData] = useState<Record<string, FocusSession[]>>({});
   const [backendSleepData, setBackendSleepData] = useState<SleepEntry[]>([]);
   const [backendStatsData, setBackendStatsData] = useState<Record<string, { completed: number; total: number; missed: number; skipped: number; focus_minutes: number }>>({});
+  const [prevWeekStatsData, setPrevWeekStatsData] = useState<Record<string, { completed: number; missed: number; skipped: number; focus_minutes: number }>>({});
 
   const weekDays = useMemo(() => {
     const start = startOfWeek(selectedWeek, { weekStartsOn: 1 });
@@ -121,7 +123,29 @@ export default function Analytics() {
         setBackendStatsData(mapped);
       }).catch(() => {});
     });
-  }, [selectedWeek]);
+
+    // Load planned tasks for the week so timing analytics (start delay,
+    // duration accuracy) can read minutes_offset / actual_start–end.
+    loadPlansForDateRange(start, end).catch(() => {});
+
+    // Previous week's daily stats for week-over-week momentum deltas.
+    const prevStart = format(startOfWeek(subWeeks(selectedWeek, 1), { weekStartsOn: 1 }), 'yyyy-MM-dd');
+    const prevEnd = format(endOfWeek(subWeeks(selectedWeek, 1), { weekStartsOn: 1 }), 'yyyy-MM-dd');
+    import('@/services/api').then(({ dailyStatsService }) => {
+      dailyStatsService.getForDateRange(prevStart, prevEnd).then((stats: any[]) => {
+        const mapped: Record<string, { completed: number; missed: number; skipped: number; focus_minutes: number }> = {};
+        for (const s of stats) {
+          mapped[s.date] = {
+            completed: s.tasks_completed,
+            missed: s.tasks_missed,
+            skipped: s.tasks_skipped ?? 0,
+            focus_minutes: s.focus_minutes,
+          };
+        }
+        setPrevWeekStatsData(mapped);
+      }).catch(() => {});
+    });
+  }, [selectedWeek, loadPlansForDateRange]);
 
   // Helper: get focus sessions from backend cache only
   const getFocusSessions = (dateStr: string): FocusSession[] => {
@@ -164,14 +188,28 @@ export default function Analytics() {
         tasksSkipped = bs.skipped;
       }
       
-      // Calculate productivity score based on real data (missed tasks penalize)
+      // Calculate productivity score based on real data (missed tasks penalize).
+      // Sleep only factors in on days it was actually logged — otherwise its
+      // 20% weight is redistributed to focus + completion so a missing sleep
+      // log can't silently tank an otherwise productive day.
+      const hasSleep = sleepQuality > 0;
       const focusScore = Math.min(100, (focusMinutes / 180) * 100); // 3 hours = 100%
       const completionScore = tasksPlanned > 0 ? (tasksCompleted / tasksPlanned) * 100 : 0;
       const missedPenalty = tasksPlanned > 0 ? (tasksMissed / tasksPlanned) * 20 : 0;
       const sleepScore = sleepQuality * 20;
-      
+
+      const focusWeight = hasSleep ? 0.4 : 0.5;
+      const completionWeight = hasSleep ? 0.4 : 0.5;
+      const sleepWeight = hasSleep ? 0.2 : 0;
+
       const productivityScore = Math.round(
-        Math.max(0, (focusScore * 0.4) + (completionScore * 0.4) + (sleepScore * 0.2) - missedPenalty)
+        Math.max(
+          0,
+          focusScore * focusWeight +
+            completionScore * completionWeight +
+            sleepScore * sleepWeight -
+            missedPenalty
+        )
       );
 
       return {
@@ -189,7 +227,14 @@ export default function Analytics() {
   }, [weekDays, backendFocusData, backendSleepData, backendStatsData]);
 
   const weeklyTotals = useMemo(() => {
-    return weeklyData.reduce(
+    const todayStr = format(new Date(), 'yyyy-MM-dd');
+    // Only count days that have already occurred so future days don't drag
+    // the average down (e.g. Thursday showing Mon–Wed avg, not Mon–Sun/7).
+    const elapsedDays = Math.max(
+      1,
+      weekDays.filter((d) => format(d, 'yyyy-MM-dd') <= todayStr).length
+    );
+    const raw = weeklyData.reduce(
       (acc, day) => ({
         tasksCompleted: acc.tasksCompleted + day.tasksCompleted,
         tasksPlanned: acc.tasksPlanned + day.tasksPlanned,
@@ -197,16 +242,23 @@ export default function Analytics() {
         tasksSkipped: acc.tasksSkipped + day.tasksSkipped,
         focusMinutes: acc.focusMinutes + day.focusMinutes,
         avgSleep: acc.avgSleep + day.sleepHours / 7,
-        avgProductivity: acc.avgProductivity + day.productivityScore / 7,
+        productivitySum: acc.productivitySum + day.productivityScore,
       }),
-      { tasksCompleted: 0, tasksPlanned: 0, tasksMissed: 0, tasksSkipped: 0, focusMinutes: 0, avgSleep: 0, avgProductivity: 0 }
+      { tasksCompleted: 0, tasksPlanned: 0, tasksMissed: 0, tasksSkipped: 0, focusMinutes: 0, avgSleep: 0, productivitySum: 0 }
     );
-  }, [weeklyData]);
+    return { ...raw, avgProductivity: raw.productivitySum / elapsedDays };
+  }, [weeklyData, weekDays]);
 
-  // Task Reliability Score = completed / (completed + missed) * 100
-  const reliabilityScore = useMemo(() => {
-    const denom = weeklyTotals.tasksCompleted + weeklyTotals.tasksMissed;
-    return denom > 0 ? Math.round((weeklyTotals.tasksCompleted / denom) * 100) : 100;
+  // Reliability = completed / (completed + missed + skipped).
+  // Skipped tasks count: they were planned and not done, whether intentional
+  // or not. Returns null when there's no data (avoids fake 100% default).
+  const reliabilityScore = useMemo((): number | null => {
+    const denom =
+      weeklyTotals.tasksCompleted +
+      weeklyTotals.tasksMissed +
+      weeklyTotals.tasksSkipped;
+    if (denom === 0) return null;
+    return Math.round((weeklyTotals.tasksCompleted / denom) * 100);
   }, [weeklyTotals]);
 
   // Get streaks
@@ -228,7 +280,119 @@ export default function Analytics() {
     }
     
     return streak;
-  }, []);
+  }, [backendFocusData, backendSleepData]);
+
+  // ---- Task-timing analytics (from planned_tasks already in the store) ----
+  const weekTaskList = useMemo<PlannedTask[]>(() => {
+    const list: PlannedTask[] = [];
+    for (const day of weekDays) {
+      const dateStr = format(day, 'yyyy-MM-dd');
+      const plan = plansByDate[dateStr];
+      if (plan?.tasks) list.push(...plan.tasks);
+    }
+    return list;
+  }, [weekDays, plansByDate]);
+
+  // Average start delay: completed tasks the user actually began late.
+  const avgStartDelay = useMemo<number | null>(() => {
+    const delayed = weekTaskList.filter(
+      (t) =>
+        t.status === 'completed' &&
+        t.start_type === 'delayed' &&
+        typeof t.minutes_offset === 'number' &&
+        t.minutes_offset > 0
+    );
+    if (delayed.length === 0) return null;
+    const sum = delayed.reduce((acc, t) => acc + (t.minutes_offset || 0), 0);
+    return Math.round(sum / delayed.length);
+  }, [weekTaskList]);
+
+  // Duration accuracy: actual time spent vs the estimate, across completed
+  // tasks. Positive % = tasks run longer than planned; negative = faster.
+  const durationAccuracy = useMemo<number | null>(() => {
+    const done = weekTaskList.filter(
+      (t) => t.status === 'completed' && t.actual_start && t.actual_end
+    );
+    let estTotal = 0;
+    let actTotal = 0;
+    for (const t of done) {
+      const est = parseDuration(t.suggested_duration || '30 minutes');
+      const act = differenceInMinutes(
+        parseISO(t.actual_end as string),
+        parseISO(t.actual_start as string)
+      );
+      if (act <= 0 || est <= 0) continue;
+      estTotal += est;
+      actTotal += act;
+    }
+    if (estTotal === 0) return null;
+    return Math.round((actTotal / estTotal - 1) * 100);
+  }, [weekTaskList]);
+
+  // Overplanning: avg tasks planned vs completed on days that had a plan.
+  const overplanning = useMemo(() => {
+    const planned = weeklyData.filter((d) => d.tasksPlanned > 0);
+    if (planned.length === 0) return null;
+    const avgPlanned =
+      planned.reduce((a, d) => a + d.tasksPlanned, 0) / planned.length;
+    const avgCompleted =
+      planned.reduce((a, d) => a + d.tasksCompleted, 0) / planned.length;
+    return {
+      avgPlanned: Math.round(avgPlanned * 10) / 10,
+      avgCompleted: Math.round(avgCompleted * 10) / 10,
+      overcommitted:
+        avgPlanned > avgCompleted * 1.3 && avgPlanned - avgCompleted >= 1,
+    };
+  }, [weeklyData]);
+
+  // Previous-week totals (daily_stats) for week-over-week momentum.
+  const prevWeekTotals = useMemo(() => {
+    const vals = Object.values(prevWeekStatsData);
+    if (vals.length === 0) return null;
+    let completed = 0;
+    let missed = 0;
+    let skipped = 0;
+    vals.forEach((s) => {
+      completed += s.completed;
+      missed += s.missed;
+      skipped += s.skipped;
+    });
+    const denom = completed + missed + skipped;
+    return {
+      tasksCompleted: completed,
+      reliability: denom > 0 ? Math.round((completed / denom) * 100) : null,
+    };
+  }, [prevWeekStatsData]);
+
+  const completedDelta = prevWeekTotals
+    ? weeklyTotals.tasksCompleted - prevWeekTotals.tasksCompleted
+    : null;
+  const reliabilityDelta =
+    reliabilityScore !== null && prevWeekTotals?.reliability !== null && prevWeekTotals
+      ? reliabilityScore - (prevWeekTotals.reliability as number)
+      : null;
+
+  const renderDelta = (delta: number | null, suffix = '') => {
+    if (delta === null || delta === 0) return null;
+    const up = delta > 0;
+    return (
+      <div
+        className={clsx(
+          'flex items-center gap-0.5 text-[10px] font-medium mt-1',
+          up ? 'text-green-600' : 'text-red-500'
+        )}
+      >
+        {up ? (
+          <TrendingUp className="w-3 h-3" />
+        ) : (
+          <TrendingDown className="w-3 h-3" />
+        )}
+        {up ? '+' : ''}
+        {delta}
+        {suffix} vs last week
+      </div>
+    );
+  };
 
   const getScoreColor = (score: number) => {
     if (score >= 80) return 'text-green-400';
@@ -308,6 +472,7 @@ export default function Analytics() {
             {weeklyTotals.tasksCompleted}/{weeklyTotals.tasksPlanned}
           </div>
           <div className="text-xs text-gray-600">Tasks Completed</div>
+          {renderDelta(completedDelta)}
         </motion.div>
 
         <motion.div
@@ -358,19 +523,48 @@ export default function Analytics() {
             <ShieldCheck className="w-5 h-5 text-emerald-500" />
             <span className={clsx(
               'text-xs font-medium',
+              reliabilityScore === null ? 'text-gray-400' :
               reliabilityScore >= 80 ? 'text-green-600' :
               reliabilityScore >= 60 ? 'text-yellow-600' : 'text-red-600'
             )}>
-              {reliabilityScore >= 80 ? '★' : reliabilityScore >= 60 ? '↗' : '↘'}
+              {reliabilityScore === null ? '—' : reliabilityScore >= 80 ? '★' : reliabilityScore >= 60 ? '↗' : '↘'}
             </span>
           </div>
-          <div className={clsx('text-2xl font-bold', 
+          <div className={clsx('text-2xl font-bold',
+            reliabilityScore === null ? 'text-gray-400' :
             reliabilityScore >= 80 ? 'text-emerald-600' :
             reliabilityScore >= 60 ? 'text-yellow-600' : 'text-red-600'
           )}>
-            {reliabilityScore}%
+            {reliabilityScore === null ? '—' : `${reliabilityScore}%`}
           </div>
           <div className="text-xs text-gray-600">Reliability Score</div>
+          {renderDelta(reliabilityDelta, '%')}
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.28 }}
+          className="glass-card"
+        >
+          <div className="flex items-center justify-between mb-2">
+            <Timer className="w-5 h-5 text-sky-500" />
+          </div>
+          <div
+            className={clsx(
+              'text-2xl font-bold',
+              avgStartDelay === null
+                ? 'text-gray-400'
+                : avgStartDelay < 10
+                ? 'text-green-600'
+                : avgStartDelay <= 20
+                ? 'text-yellow-600'
+                : 'text-orange-600'
+            )}
+          >
+            {avgStartDelay === null ? '—' : `${avgStartDelay}m`}
+          </div>
+          <div className="text-xs text-gray-600">Avg Start Delay</div>
         </motion.div>
 
         <motion.div
@@ -485,27 +679,30 @@ export default function Analytics() {
       <div className="glass-card">
         <h3 className="text-lg font-semibold text-gray-900 mb-4">Productivity Score</h3>
         <div className="grid grid-cols-7 gap-2">
-          {weeklyData.map((day) => (
-            <motion.div
-              key={day.date}
-              whileHover={{ scale: 1.05 }}
-              className={clsx(
-                'p-4 rounded-apple text-center cursor-pointer transition-all',
-                getScoreBg(day.productivityScore)
-              )}
-            >
-              <div className="text-xs text-gray-600 mb-1">
-                {format(parseISO(day.date), 'EEE')}
-              </div>
-              <div className="text-sm font-medium text-gray-700">
-                {format(parseISO(day.date), 'MMM d')}
-              </div>
-              <div className={clsx('text-2xl font-bold mt-2', getScoreColor(day.productivityScore))}>
-                {day.productivityScore}
-              </div>
-              <div className="text-xs text-gray-500 mt-1">score</div>
-            </motion.div>
-          ))}
+          {weeklyData.map((day) => {
+            const hasData = day.tasksPlanned > 0 || day.focusMinutes > 0 || day.sleepHours > 0;
+            return (
+              <motion.div
+                key={day.date}
+                whileHover={{ scale: 1.05 }}
+                className={clsx(
+                  'p-4 rounded-apple text-center cursor-pointer transition-all',
+                  hasData ? getScoreBg(day.productivityScore) : 'bg-gray-100'
+                )}
+              >
+                <div className="text-xs text-gray-600 mb-1">
+                  {format(parseISO(day.date), 'EEE')}
+                </div>
+                <div className="text-sm font-medium text-gray-700">
+                  {format(parseISO(day.date), 'MMM d')}
+                </div>
+                <div className={clsx('text-2xl font-bold mt-2', hasData ? getScoreColor(day.productivityScore) : 'text-gray-400')}>
+                  {hasData ? day.productivityScore : '—'}
+                </div>
+                <div className="text-xs text-gray-500 mt-1">score</div>
+              </motion.div>
+            );
+          })}
         </div>
         
         <div className="flex items-center justify-center gap-2 mt-4">
@@ -610,10 +807,22 @@ export default function Analytics() {
               <span className="font-medium text-gray-900">Goal Progress</span>
             </div>
             <p className="text-gray-700 text-sm">
-              You completed {weeklyTotals.tasksCompleted} tasks this week, 
-              {weeklyTotals.tasksCompleted >= 20 
-                ? " exceeding your weekly target! 🎉" 
-                : ` ${20 - weeklyTotals.tasksCompleted} more to hit your target.`}
+              {weeklyTotals.tasksPlanned > 0 ? (
+                <>
+                  You completed {weeklyTotals.tasksCompleted} of{' '}
+                  {weeklyTotals.tasksPlanned} planned tasks this week (
+                  {Math.round(
+                    (weeklyTotals.tasksCompleted / weeklyTotals.tasksPlanned) *
+                      100
+                  )}
+                  %).
+                  {weeklyTotals.tasksCompleted >= weeklyTotals.tasksPlanned
+                    ? ' You cleared everything you planned. 🎉'
+                    : ' Keep chipping away at the rest.'}
+                </>
+              ) : (
+                'No tasks planned this week yet — add a plan to start tracking progress.'
+              )}
             </p>
           </div>
           
@@ -624,9 +833,12 @@ export default function Analytics() {
             </div>
             <p className="text-gray-700 text-sm">
               {(() => {
-                const bestDay = weeklyData.reduce((best, day) => 
+                const bestDay = weeklyData.reduce((best, day) =>
                   day.focusMinutes > best.focusMinutes ? day : best
                 );
+                if (bestDay.focusMinutes === 0) {
+                  return 'No focus sessions recorded this week yet. Try the Focus Timer to start tracking.';
+                }
                 return `${format(parseISO(bestDay.date), 'EEEE')} with ${Math.round(bestDay.focusMinutes / 60 * 10) / 10} hours of focused work.`;
               })()}
             </p>
@@ -651,12 +863,42 @@ export default function Analytics() {
               <span className="font-medium text-gray-900">Streak Status</span>
             </div>
             <p className="text-gray-700 text-sm">
-              You're on a {currentStreak}-day streak! 
-              {currentStreak >= 7 
-                ? " Amazing consistency! 🔥" 
+              You're on a {currentStreak}-day streak!
+              {currentStreak >= 7
+                ? " Amazing consistency! 🔥"
                 : " Keep logging your activities daily."}
             </p>
           </div>
+
+          {durationAccuracy !== null && (
+            <div className="p-4 bg-gray-50 rounded-apple">
+              <div className="flex items-center gap-2 mb-2">
+                <Hourglass className="w-5 h-5 text-blue-500" />
+                <span className="font-medium text-gray-900">Time Estimates</span>
+              </div>
+              <p className="text-gray-700 text-sm">
+                {durationAccuracy === 0
+                  ? 'Your tasks finish almost exactly as long as you estimate — great calibration. 🎯'
+                  : durationAccuracy > 0
+                  ? `Tasks take about ${durationAccuracy}% longer than estimated on average. Consider padding your time estimates so plans stay realistic.`
+                  : `You finish tasks about ${Math.abs(durationAccuracy)}% faster than estimated — you have room to plan a bit more in.`}
+              </p>
+            </div>
+          )}
+
+          {overplanning && overplanning.overcommitted && (
+            <div className="p-4 bg-amber-50 rounded-apple border border-amber-100">
+              <div className="flex items-center gap-2 mb-2">
+                <AlertTriangle className="w-5 h-5 text-amber-500" />
+                <span className="font-medium text-gray-900">Overplanning</span>
+              </div>
+              <p className="text-gray-700 text-sm">
+                You planned {overplanning.avgPlanned} tasks/day on average but
+                completed {overplanning.avgCompleted}. Planning fewer,
+                higher-impact tasks will make your days feel more achievable.
+              </p>
+            </div>
+          )}
 
           {weeklyTotals.tasksMissed > 0 && (
             <div className="p-4 bg-orange-50 rounded-apple border border-orange-100">
@@ -674,9 +916,24 @@ export default function Analytics() {
                     ? `${format(parseISO(worstDay.date), 'EEEE')} had the most misses (${worstDay.tasksMissed}). `
                     : '';
                 })()}
-                {reliabilityScore >= 80
+                {(reliabilityScore ?? 0) >= 80
                   ? 'Your reliability is still strong — keep it up! 💪'
                   : 'Try scheduling fewer tasks or adding buffer time between them.'}
+              </p>
+            </div>
+          )}
+
+          {weeklyTotals.tasksSkipped > 0 && (
+            <div className="p-4 bg-sky-50 rounded-apple border border-sky-100">
+              <div className="flex items-center gap-2 mb-2">
+                <XCircle className="w-5 h-5 text-sky-500" />
+                <span className="font-medium text-gray-900">Skipped Tasks</span>
+              </div>
+              <p className="text-gray-700 text-sm">
+                You skipped {weeklyTotals.tasksSkipped} task
+                {weeklyTotals.tasksSkipped > 1 ? 's' : ''} this week. Skipped
+                tasks count against your reliability score — reschedule them
+                instead to keep your streak intact.
               </p>
             </div>
           )}
@@ -687,12 +944,17 @@ export default function Analytics() {
               <span className="font-medium text-gray-900">Reliability Score</span>
             </div>
             <p className="text-gray-700 text-sm">
-              Your task reliability is {reliabilityScore}%. 
-              {reliabilityScore >= 90
-                ? 'Exceptional! You follow through on nearly everything you plan. 🏆'
-                : reliabilityScore >= 70
-                ? 'Good consistency. Small improvements in scheduling can push this higher.'
-                : 'Consider being more selective with what you plan — quality over quantity.'}
+              {reliabilityScore === null
+                ? 'No planned tasks yet this week — complete your first task to start tracking reliability.'
+                : <>
+                    Your task reliability is {reliabilityScore}%.{' '}
+                    {reliabilityScore >= 90
+                      ? 'Exceptional — you follow through on nearly everything you plan. 🏆'
+                      : reliabilityScore >= 70
+                      ? 'Good consistency. Rescheduling instead of skipping will push this higher.'
+                      : 'Consider planning fewer tasks or rescheduling instead of skipping — quality over quantity.'}
+                  </>
+              }
             </p>
           </div>
         </div>
@@ -748,7 +1010,7 @@ export default function Analytics() {
         </div>
         
         <p className="text-xs text-gray-500 mt-3 text-center">
-          The more you use PlanIQ, the smarter your insights become ✨
+          The more you use Taskly, the smarter your insights become ✨
         </p>
       </div>
     </div>

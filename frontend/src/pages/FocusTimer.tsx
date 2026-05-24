@@ -16,7 +16,7 @@ import {
   Moon,
   BarChart3,
 } from 'lucide-react';
-import { Button } from '@/components/ui';
+import { Button, Modal } from '@/components/ui';
 import { getRemainingSeconds, useFocusCountdownStore, useTaskStore, useTimerPromptStore } from '@/stores';
 import { activeFocusTimerService, focusSessionService, focusSettingsService, FocusSettings } from '@/services/api';
 import { subscribeToTimerBroadcasts } from '@/services/timerBroadcast';
@@ -49,6 +49,10 @@ interface TimerSettings {
   autoStartFocus: boolean;
   soundEnabled: boolean;
 }
+
+// Below this much time remaining, finishing "early" is effectively finishing on
+// time — so we skip the confirmation prompt and just complete the task.
+const EARLY_FINISH_CONFIRM_SECONDS = 5 * 60;
 
 const DEFAULT_SETTINGS: TimerSettings = {
   focusDuration: 25,
@@ -104,9 +108,11 @@ export default function FocusTimer() {
   const [showStartConfirm, setShowStartConfirm] = useState(false);
   const [hydratedFromSharedSnapshot, setHydratedFromSharedSnapshot] = useState(false);
   const [serverTimerHydrated, setServerTimerHydrated] = useState(false);
+  const [showFinishEarlyConfirm, setShowFinishEarlyConfirm] = useState(false);
 
   const { plannedTasks, loadPlanFromDatabase, updatePlannedTask } = useTaskStore();
   const syncSharedCountdown = useFocusCountdownStore((state) => state.syncSnapshot);
+  const clearSharedCountdown = useFocusCountdownStore((state) => state.clearSnapshot);
   // Completion prompt lives in a global store so it can be surfaced from Layout
   // (mandatory yes/no even when the user has navigated away from FocusTimer).
   const globalPrompt = useTimerPromptStore((state) => state.prompt);
@@ -192,6 +198,37 @@ export default function FocusTimer() {
           return;
         }
 
+        // If the user navigated here with autostart=1 for a specific task, a server
+        // timer for a *different* task is stale context — don't let it overwrite URL
+        // task params or cancel the pending autostart. The persistence effect will
+        // overwrite the stale timer once the new session begins.
+        const urlTaskId = searchParams.get('task');
+        const isAutoStartMode = searchParams.get('autostart') === '1';
+        if (isAutoStartMode && urlTaskId && serverTimer.task_id !== urlTaskId) {
+          return;
+        }
+
+        // If a live session was already restored from the shared snapshot (e.g.
+        // the user navigated back here via the mini countdown popup), that is the
+        // authoritative running state. The server copy can be momentarily stale —
+        // during the start sequence the persistence effect emits intermediate
+        // is_running=false saves before the final running save. Letting that stale
+        // copy through here would stop a timer that is actually still running. So
+        // keep the live display and only backfill missing metadata.
+        const liveSnapshot = useFocusCountdownStore.getState();
+        const hasLiveRunningSession = liveSnapshot.isRunning
+          && (!serverTimer.task_id || liveSnapshot.taskId === serverTimer.task_id);
+        if (hasLiveRunningSession) {
+          setSessionConfirmed(true);
+          if (serverTimer.task_date) {
+            setTaskDate((prev) => prev || serverTimer.task_date);
+          }
+          if (serverTimer.mode === 'focus' && serverTimer.total_seconds > 0) {
+            setTaskDurationMinutes((prev) => prev ?? Math.max(1, Math.round(serverTimer.total_seconds / 60)));
+          }
+          return;
+        }
+
         const startedAtMs = serverTimer.started_at ? new Date(serverTimer.started_at).getTime() : null;
         const elapsedSeconds = serverTimer.is_running && startedAtMs
           ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
@@ -209,7 +246,12 @@ export default function FocusTimer() {
         setTimeLeft(remainingSeconds);
         setIsRunning(serverTimer.is_running);
         setSessionConfirmed(true);
-        setAutoStartRequested(false);
+        // Only cancel autostart if the timer is actively running for this same task.
+        // When paused/expired, we want autostart to start a fresh session.
+        // When running, the !isRunning guard in the autostart effect already blocks double-start.
+        if (!isAutoStartMode) {
+          setAutoStartRequested(false);
+        }
 
         if (serverTimer.mode === 'focus' && serverTimer.total_seconds > 0) {
           setTaskDurationMinutes(Math.max(1, Math.round(serverTimer.total_seconds / 60)));
@@ -424,8 +466,26 @@ export default function FocusTimer() {
 
   // When a task-specific duration changes, sync timer display while not running.
   useEffect(() => {
-    if (!hydratedFromSharedSnapshot) return;
+    // Wait until BOTH hydration sources have settled. The reset race happens in
+    // the window after the shared snapshot restores the timer but before the
+    // server fetch resolves, where activeFocusDuration jumps from the default to
+    // the task's duration. Gating on serverTimerHydrated closes that window.
+    if (!hydratedFromSharedSnapshot || !serverTimerHydrated) return;
     if (mode !== 'focus' || isRunning) return;
+
+    // Never reset an active/restored session. After navigating back to this page,
+    // there is a brief window where isRunning is false while the snapshot/server
+    // timer is still being hydrated and activeFocusDuration jumps from the default
+    // to the task's duration. Without this guard that race resets a running timer
+    // to its full duration (e.g. 60:00) and stops it — so it never counts down to
+    // zero and the task is left stuck "in progress".
+    if (sessionConfirmed) return;
+
+    // Authoritative guard: the shared countdown store reflects whether a timer is
+    // live anywhere in the app. If it says running, never reset the display out
+    // from under it — even if local isRunning/sessionConfirmed both transiently
+    // read false during the hydration handoff.
+    if (useFocusCountdownStore.getState().isRunning) return;
 
     // If the timer is paused mid-session, keep its remaining seconds unchanged.
     if (sessionTotalSeconds > 0 && timeLeft !== sessionTotalSeconds) {
@@ -440,6 +500,8 @@ export default function FocusTimer() {
     hydratedFromSharedSnapshot,
     isRunning,
     mode,
+    serverTimerHydrated,
+    sessionConfirmed,
     sessionTotalSeconds,
     timeLeft,
   ]);
@@ -760,6 +822,98 @@ export default function FocusTimer() {
     setIsRunning(true);
   };
 
+  // Finish a task before its timer runs out. Records the elapsed time as a
+  // focus session, marks the task completed, and clears the running timer —
+  // the counterpart to the "early start" flow.
+  const handleFinishEarly = useCallback(async () => {
+    if (!selectedTaskId || mode !== 'focus') return;
+    const task = plannedTasks.find((t) => t.id === selectedTaskId);
+    if (!task || ['completed', 'cancelled', 'skipped', 'missed'].includes(task.status)) return;
+
+    // Stop the countdown immediately so it can't also fire handleTimerComplete.
+    setIsRunning(false);
+
+    const total = sessionTotalSeconds > 0 ? sessionTotalSeconds : activeFocusDuration * 60;
+    const elapsedSeconds = Math.max(60, total - Math.max(0, timeLeft));
+    const endTime = new Date();
+    const startTime = new Date(endTime.getTime() - elapsedSeconds * 1000);
+    const nowIso = endTime.toISOString();
+
+    // Record the partial focus session (optimistic, then persist).
+    const tempId = `tmp-${Date.now()}`;
+    setTodaySessions((prev) => [
+      ...prev,
+      {
+        id: tempId,
+        taskId: selectedTaskId,
+        taskName: task.task_name,
+        startTime,
+        endTime,
+        duration: elapsedSeconds,
+        mode: 'focus',
+        completed: true,
+      },
+    ]);
+    setSessionsCompleted((prev) => prev + 1);
+    focusSessionService.save({
+      task_id: selectedTaskId,
+      task_name: task.task_name,
+      start_time: startTime.toISOString(),
+      end_time: nowIso,
+      duration: elapsedSeconds,
+      mode: 'focus',
+      completed: true,
+      session_date: format(new Date(), 'yyyy-MM-dd'),
+    })
+      .then((saved: any) => {
+        setTodaySessions((prev) => prev.map((s) => (s.id === tempId ? { ...s, id: saved.id } : s)));
+      })
+      .catch((error) => {
+        console.error('Failed to save early-finish focus session:', error);
+      });
+
+    // Mark the task completed.
+    try {
+      await updatePlannedTask(selectedTaskId, {
+        status: 'completed',
+        actual_start: task.actual_start || startTime.toISOString(),
+        actual_end: nowIso,
+      });
+      toast.success('Task completed early — nice work!');
+    } catch (error) {
+      console.error('Failed to complete task early:', error);
+      toast.error('Could not save completion. Please try again.');
+      return;
+    }
+
+    // Clear the active timer everywhere and reset the display to a fresh session.
+    activeFocusTimerService.clear().catch(() => undefined);
+    clearSharedCountdown();
+    setSessionConfirmed(false);
+    const fresh = activeFocusDuration * 60;
+    setSessionTotalSeconds(fresh);
+    setTimeLeft(fresh);
+  }, [
+    activeFocusDuration,
+    clearSharedCountdown,
+    mode,
+    plannedTasks,
+    selectedTaskId,
+    sessionTotalSeconds,
+    timeLeft,
+    updatePlannedTask,
+  ]);
+
+  // Gate the finish-early action behind a confirmation only when a meaningful
+  // amount of time is left. Within the final few minutes, just complete it.
+  const requestFinishEarly = useCallback(() => {
+    if (timeLeft > EARLY_FINISH_CONFIRM_SECONDS) {
+      setShowFinishEarlyConfirm(true);
+      return;
+    }
+    handleFinishEarly();
+  }, [timeLeft, handleFinishEarly]);
+
   const selectTask = useCallback((taskId: string | null) => {
     setSelectedTaskId(taskId);
     setSessionConfirmed(false); // new task selection resets confirmation
@@ -995,6 +1149,20 @@ export default function FocusTimer() {
           </Button>
         </div>
 
+        {/* Finish early — complete the task before the timer runs out */}
+        {mode === 'focus' && selectedTask && selectedTask.status === 'in_progress' && (
+          <div className="mt-6 flex justify-center">
+            <Button
+              variant="secondary"
+              onClick={requestFinishEarly}
+              className="gap-2"
+            >
+              <CheckCircle2 className="w-5 h-5 text-green-600" />
+              Finish &amp; complete task
+            </Button>
+          </div>
+        )}
+
         {/* Task Selection */}
         {mode === 'focus' && plannedTasks.length > 0 && (
           <div className="mt-8">
@@ -1195,6 +1363,40 @@ export default function FocusTimer() {
       {/* Timer-completion prompt now renders globally in Layout via
           <GlobalTimerCompletionPrompt /> so the mandatory yes/no surfaces
           regardless of which page the user is on after expiry. */}
+
+      {/* Finish-early confirmation — only shown when meaningful time remains */}
+      {showFinishEarlyConfirm && selectedTask && (
+        <Modal isOpen onClose={() => setShowFinishEarlyConfirm(false)}>
+          <div className="space-y-4">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Finish early?</h2>
+              <p className="text-sm text-gray-700 mt-1">
+                You still have about {Math.ceil(timeLeft / 60)} minutes left on{' '}
+                <span className="font-medium">{selectedTask.task_name}</span>. Mark it complete now?
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <Button
+                variant="ghost"
+                className="flex-1"
+                onClick={() => setShowFinishEarlyConfirm(false)}
+              >
+                Keep going
+              </Button>
+              <Button
+                variant="primary"
+                className="flex-1 bg-green-600 hover:bg-green-700 active:bg-green-800 focus:ring-green-500"
+                onClick={() => {
+                  setShowFinishEarlyConfirm(false);
+                  handleFinishEarly();
+                }}
+              >
+                Yes, complete
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
 
       {/* Task Start Confirmation Modal (manual play with a selected task) */}
       {showStartConfirm && selectedTaskId && (() => {

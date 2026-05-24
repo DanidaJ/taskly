@@ -590,4 +590,54 @@ export const routineTemplateService = {
   },
 };
 
+// ============================================
+// Backlog Service (unscheduled task capture)
+// ============================================
+
+export interface BacklogItem {
+  id: string;
+  user_id: string;
+  name: string;
+  description?: string | null;
+  estimated_minutes: number;
+  priority: 'low' | 'medium' | 'high';
+  cognitive_load: string;
+  tags: string[];
+  notes?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BacklogScheduleInput {
+  date: string;             // YYYY-MM-DD
+  scheduled_start?: string; // HH:MM optional
+  scheduled_end?: string;   // HH:MM optional
+}
+
+export const backlogService = {
+  async list(): Promise<BacklogItem[]> {
+    const response = await api.get('/backlog');
+    return response.data;
+  },
+
+  async create(item: Partial<BacklogItem>): Promise<BacklogItem> {
+    const response = await api.post('/backlog', item);
+    return response.data;
+  },
+
+  async update(id: string, updates: Partial<BacklogItem>): Promise<BacklogItem> {
+    const response = await api.patch(`/backlog/${id}`, updates);
+    return response.data;
+  },
+
+  async remove(id: string): Promise<void> {
+    await api.delete(`/backlog/${id}`);
+  },
+
+  async schedule(id: string, input: BacklogScheduleInput): Promise<any> {
+    const response = await api.post(`/backlog/${id}/schedule`, input);
+    return response.data;
+  },
+};
+
 export default api;

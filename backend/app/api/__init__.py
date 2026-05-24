@@ -5,6 +5,7 @@ from .notification_routes import router as notification_router
 from .profile_routes import router as profile_router
 from .data_routes import router as data_router
 from .recurring_routes import router as recurring_router
+from .backlog_routes import router as backlog_router
 
 __all__ = [
     "ai_router",
@@ -14,4 +15,5 @@ __all__ = [
     "profile_router",
     "data_router",
     "recurring_router",
+    "backlog_router",
 ]

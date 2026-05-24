@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plus, X, Send } from 'lucide-react';
+import { Plus, X, Send, Calendar, Inbox } from 'lucide-react';
 import { DatePicker, TimePicker } from '@/components/ui';
-import { useTaskStore } from '@/stores';
+import { useTaskStore, useBacklogStore } from '@/stores';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
 import { planService } from '@/services/api';
@@ -13,22 +13,48 @@ interface QuickCaptureProps {
   isOpen: boolean;
 }
 
+type CaptureMode = 'schedule' | 'backlog';
+
+const DURATION_PRESETS = [
+  { label: '15m', value: '15' },
+  { label: '30m', value: '30' },
+  { label: '1h', value: '60' },
+  { label: '1.5h', value: '90' },
+  { label: '2h', value: '120' },
+];
+
 export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
+  const [mode, setMode] = useState<CaptureMode>('schedule');
   const [taskName, setTaskName] = useState('');
-  const [duration, setDuration] = useState('30');
+  const [duration, setDuration] = useState('60');
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('medium');
   const [dueDate, setDueDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
   const [scheduledTime, setScheduledTime] = useState(() => format(new Date(), 'HH:mm'));
 
   const inputRef = useRef<HTMLInputElement>(null);
   const { currentPlan, plansByDate, loadPlanFromDatabase } = useTaskStore();
+  const addBacklogItem = useBacklogStore((s) => s.addItem);
 
-  // Focus input when opened
+  // Reset form and refresh time whenever the modal opens
   useEffect(() => {
-    if (isOpen && inputRef.current) {
+    if (isOpen) {
+      setMode('schedule');
+      setTaskName('');
+      setDuration('60');
+      setPriority('medium');
+      setDueDate(format(new Date(), 'yyyy-MM-dd'));
+      setScheduledTime(format(new Date(), 'HH:mm'));
       setTimeout(() => inputRef.current?.focus(), 100);
     }
   }, [isOpen]);
+
+  const isTimeInPast = (): boolean => {
+    if (mode !== 'schedule') return false;
+    if (!scheduledTime || !dueDate) return false;
+    const selectedDateTime = new Date(`${dueDate}T${scheduledTime}`);
+    const now = new Date();
+    return selectedDateTime < new Date(now.getTime() - 2 * 60 * 60 * 1000);
+  };
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -38,28 +64,34 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
       return;
     }
 
+    if (isTimeInPast()) {
+      toast.error('Cannot schedule a task more than 2 hours in the past.');
+      return;
+    }
+
     try {
-      const taskDescription = scheduledTime ? `Scheduled for ${scheduledTime}` : '';
-
-      // Validate scheduled time is not in the past
-      if (scheduledTime && dueDate) {
-        const selectedDateTime = new Date(`${dueDate}T${scheduledTime}`);
-        const now = new Date();
-
-        if (selectedDateTime < now) {
-          toast.error('Cannot schedule tasks in the past. Please select a future time.');
-          return;
+      if (mode === 'backlog') {
+        const created = await addBacklogItem({
+          name: taskName,
+          estimated_minutes: parseInt(duration) || 60,
+          priority,
+        });
+        if (created) {
+          toast.success('Added to backlog');
+          onClose?.();
+        } else {
+          toast.error('Failed to add to backlog');
         }
+        return;
       }
 
-      // Parse scheduled time to start and end
+      // Schedule path
       let scheduled_start: string | undefined;
       let scheduled_end: string | undefined;
 
       if (scheduledTime) {
         scheduled_start = scheduledTime;
-        // Add duration to get end time
-        const durationMinutes = parseInt(duration);
+        const durationMinutes = parseInt(duration) || 60;
         const [hours, mins] = scheduledTime.split(':').map(Number);
         const endTimeMinutes = hours * 60 + mins + durationMinutes;
         const endHours = Math.floor(endTimeMinutes / 60) % 24;
@@ -67,27 +99,23 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
         scheduled_end = `${String(endHours).padStart(2, '0')}:${String(endMins).padStart(2, '0')}`;
       }
 
-      // Create a planned task directly (no separate task entry needed)
-      const today = dueDate; // Use selected due date
-
-      // Get existing tasks for THIS date only (not all tasks in store)
+      const today = dueDate;
       const existingTasksForDate = plansByDate[today]?.tasks ||
         (currentPlan?.date === today ? currentPlan.tasks || [] : []);
 
       const plannedTaskEntry = {
         id: `planned-${Date.now()}`,
-        task_id: '', // No separate task reference needed
+        task_id: '',
         task_name: taskName,
         suggested_duration: `${duration} minutes`,
         priority: priority as 'low' | 'medium' | 'high',
-        notes: taskDescription || undefined,
+        notes: undefined,
         scheduled_start,
         scheduled_end,
         status: 'pending' as const,
         order: existingTasksForDate.length,
       };
 
-      // Create or update today's daily plan with only tasks for this date
       const planToSave = {
         date: today,
         is_ai_generated: false,
@@ -96,17 +124,13 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
 
       const savedPlan = await planService.save(planToSave);
 
-      // Update state immediately with the saved plan for instant UI update
       if (savedPlan) {
-        // Update plansByDate and rebuild plannedTasks from all loaded plans.
         useTaskStore.setState((state) => {
           const updatedPlansByDate = {
             ...state.plansByDate,
             [today]: savedPlan,
           };
-
           const allTasks = Object.values(updatedPlansByDate).flatMap((plan) => plan.tasks || []);
-
           return {
             currentPlan: savedPlan,
             plansByDate: updatedPlansByDate,
@@ -114,16 +138,10 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
           };
         });
       } else {
-        // Fallback: reload from database if save didn't return the plan
         await loadPlanFromDatabase(today);
       }
 
       toast.success('Task added!');
-      setTaskName('');
-      setDuration('30');
-      setPriority('medium');
-      setDueDate(format(new Date(), 'yyyy-MM-dd'));
-      setScheduledTime(format(new Date(), 'HH:mm'));
       onClose?.();
     } catch (error) {
       console.error('Failed to add task:', error);
@@ -131,26 +149,26 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
     }
   };
 
-  // Keyboard shortcut to open (Cmd/Ctrl + K)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
-        if (isOpen) {
-          onClose?.();
-        }
+        if (isOpen) onClose?.();
       }
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
+
+  const pastWarning = mode === 'schedule' && scheduledTime && dueDate && (() => {
+    const dt = new Date(`${dueDate}T${scheduledTime}`);
+    return dt < new Date() && !isTimeInPast();
+  })();
 
   return (
     <AnimatePresence>
       {isOpen && (
         <>
-          {/* Backdrop */}
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -159,36 +177,59 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
             onClick={onClose}
           />
 
-          {/* Add Task Modal */}
           <motion.div
             initial={{ opacity: 0, y: -20, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -20, scale: 0.95 }}
-            className="fixed top-[20%] left-1/2 -translate-x-1/2 w-full max-w-xl z-50 px-4"
+            className="fixed top-[12%] left-1/2 -translate-x-1/2 w-full max-w-xl z-50 px-4"
           >
             <div className="bg-dark-800/80 backdrop-blur-xl border border-dark-600/60 rounded-xl shadow-2xl overflow-visible">
               {/* Header */}
               <div className="flex items-center justify-between px-4 py-3 border-b border-dark-700/60">
                 <div className="flex items-center gap-2">
                   <Plus className="w-5 h-5 text-primary-400" />
-                  <span className="font-medium text-dark-100">Add Task</span>
+                  <span className="font-medium text-dark-100">Quick Add Task</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-dark-400 bg-dark-700 px-2 py-1 rounded">
-                    ⌘K
-                  </span>
-                  <button
-                    onClick={onClose}
-                    className="p-1 rounded hover:bg-dark-700 text-dark-400"
-                  >
+                  <span className="text-xs text-dark-400 bg-dark-700 px-2 py-1 rounded">⌘K</span>
+                  <button onClick={onClose} className="p-1 rounded hover:bg-dark-700 text-dark-400">
                     <X className="w-5 h-5" />
                   </button>
                 </div>
               </div>
 
-              {/* Form */}
               <form onSubmit={handleSubmit}>
                 <div className="p-4 space-y-4">
+                  {/* Mode toggle */}
+                  <div className="flex gap-2 p-1 bg-gray-100 rounded-lg">
+                    <button
+                      type="button"
+                      onClick={() => setMode('schedule')}
+                      className={clsx(
+                        'flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-md text-sm font-medium transition-colors',
+                        mode === 'schedule'
+                          ? 'bg-white text-gray-900 shadow-sm'
+                          : 'text-gray-600 hover:text-gray-900'
+                      )}
+                    >
+                      <Calendar className="w-4 h-4" />
+                      Schedule now
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMode('backlog')}
+                      className={clsx(
+                        'flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-md text-sm font-medium transition-colors',
+                        mode === 'backlog'
+                          ? 'bg-white text-gray-900 shadow-sm'
+                          : 'text-gray-600 hover:text-gray-900'
+                      )}
+                    >
+                      <Inbox className="w-4 h-4" />
+                      Add to backlog
+                    </button>
+                  </div>
+
                   {/* Task Name */}
                   <div>
                     <label className="block text-sm font-medium text-gray-600 mb-2">
@@ -199,24 +240,71 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
                       type="text"
                       value={taskName}
                       onChange={(e) => setTaskName(e.target.value)}
-                      placeholder="Enter task name..."
+                      placeholder={
+                        mode === 'schedule'
+                          ? 'e.g. Meeting with team, Call dentist…'
+                          : 'e.g. Finish personal project, Read book…'
+                      }
                       className="w-full h-11 bg-white border border-gray-300 rounded-lg px-4 py-2 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                     />
                   </div>
 
+                  {/* Schedule-only: Time + Date */}
+                  {mode === 'schedule' && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <TimePicker
+                          label="Start Time"
+                          value={scheduledTime}
+                          onChange={setScheduledTime}
+                        />
+                        {pastWarning && (
+                          <p className="text-xs text-amber-600 mt-1">
+                            This time has passed — task will be logged retroactively.
+                          </p>
+                        )}
+                      </div>
+                      <div>
+                        <DatePicker
+                          label="Date"
+                          value={dueDate}
+                          onChange={setDueDate}
+                        />
+                      </div>
+                    </div>
+                  )}
+
                   {/* Duration */}
                   <div>
                     <label className="block text-sm font-medium text-gray-600 mb-2">
-                      Estimated Duration (minutes)
+                      {mode === 'backlog' ? 'Estimated duration' : 'Duration'}
                     </label>
-                    <input
-                      type="number"
-                      min="1"
-                      max="480"
-                      value={duration}
-                      onChange={(e) => setDuration(e.target.value)}
-                      className="w-full h-11 bg-white border border-gray-300 rounded-lg px-4 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                    />
+                    <div className="flex gap-2 flex-wrap">
+                      {DURATION_PRESETS.map((p) => (
+                        <button
+                          key={p.value}
+                          type="button"
+                          onClick={() => setDuration(p.value)}
+                          className={clsx(
+                            'px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
+                            duration === p.value
+                              ? 'bg-blue-600 text-white'
+                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                          )}
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                      <input
+                        type="number"
+                        min="1"
+                        max="480"
+                        value={duration}
+                        onChange={(e) => setDuration(e.target.value)}
+                        className="w-20 h-8 bg-white border border-gray-300 rounded-lg px-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="min"
+                      />
+                    </div>
                   </div>
 
                   {/* Priority */}
@@ -247,25 +335,12 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
                     </div>
                   </div>
 
-                  {/* Due Date */}
-                  <div>
-                    <DatePicker
-                      label="Due Date (Optional)"
-                      value={dueDate}
-                      onChange={setDueDate}
-                    />
-                    <p className="mt-1 text-xs text-gray-500">Use date shortcuts or press Arrow Up/Down to jump days, Shift+Arrow for weeks.</p>
-                  </div>
-
-                  {/* Scheduled Time */}
-                  <div>
-                    <TimePicker
-                      label="Scheduled Time (Optional)"
-                      value={scheduledTime}
-                      onChange={setScheduledTime}
-                    />
-                    <p className="text-xs text-gray-500 mt-1">Use hour/minute +/- controls and AM/PM toggle, or type exact values in each field.</p>
-                  </div>
+                  {/* Mode hint */}
+                  {mode === 'backlog' && (
+                    <div className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                      Backlog items have no date. You can schedule them later from the Backlog page.
+                    </div>
+                  )}
                 </div>
 
                 {/* Actions */}
@@ -288,7 +363,7 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
                     )}
                   >
                     <Send className="w-4 h-4" />
-                    Add Task
+                    {mode === 'backlog' ? 'Add to Backlog' : 'Add Task'}
                   </button>
                 </div>
               </form>

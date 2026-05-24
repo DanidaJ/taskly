@@ -271,6 +271,94 @@ class ScheduleService:
         
         return score
     
+    def _apply_time_constraints(
+        self,
+        available_slots: List[Tuple[datetime, datetime]],
+        base_date: datetime,
+        earliest_start: Optional[time] = None,
+    ) -> List[Tuple[datetime, datetime]]:
+        """Trim slots to honor (a) a user-stated earliest start and (b) the
+        current time when scheduling for today. Safe to call repeatedly — it
+        must be re-applied whenever slots are recomputed (e.g. after blocking
+        out fixed tasks) so nothing ever lands in the past."""
+        slots = available_slots
+
+        # Respect user-stated earliest start constraint (e.g. "starting past 10pm")
+        if earliest_start is not None:
+            earliest_dt = datetime.combine(base_date.date(), earliest_start)
+            trimmed = []
+            for slot_start, slot_end in slots:
+                if slot_end <= earliest_dt:
+                    continue
+                trimmed.append((max(slot_start, earliest_dt), slot_end))
+            slots = trimmed
+            logger.info("Applied earliest start filter",
+                        earliest=earliest_start.strftime('%H:%M'),
+                        remaining_slots=len(slots))
+
+        # Filter out past time slots if scheduling for today
+        now = datetime.now()
+        if base_date.date() == now.date():
+            filtered_slots = []
+            for slot_start, slot_end in slots:
+                if slot_end <= now:
+                    logger.info(f"Skipping past slot: {slot_start.strftime('%H:%M')} - {slot_end.strftime('%H:%M')}")
+                    continue
+                elif slot_start < now < slot_end:
+                    # Round up to next 15 minutes
+                    minutes = (now.minute // 15 + 1) * 15
+                    if minutes >= 60:
+                        adjusted = now.replace(hour=(now.hour + 1) % 24, minute=0, second=0, microsecond=0)
+                    else:
+                        adjusted = now.replace(minute=minutes, second=0, microsecond=0)
+                    logger.info(f"Adjusting partial past slot from {slot_start.strftime('%H:%M')} to {adjusted.strftime('%H:%M')}")
+                    filtered_slots.append((adjusted, slot_end))
+                else:
+                    filtered_slots.append((slot_start, slot_end))
+            slots = filtered_slots
+            logger.info("Filtered past time slots", remaining_slots=len(slots))
+
+        return slots
+
+    def _parse_fixed_interval(
+        self, task: PlannedTask, base_date: datetime
+    ) -> Optional[Tuple[datetime, datetime]]:
+        """Convert a task's scheduled_start/end ('HH:MM') into concrete datetimes
+        anchored on base_date. If the end is <= start, it's treated as crossing
+        midnight (end is the next day). Returns None if unparseable."""
+        try:
+            sh, sm = map(int, task.scheduled_start.split(':'))
+            eh, em = map(int, task.scheduled_end.split(':'))
+        except (ValueError, AttributeError):
+            return None
+        start_dt = base_date.replace(hour=sh, minute=sm, second=0, microsecond=0)
+        end_dt = base_date.replace(hour=eh, minute=em, second=0, microsecond=0)
+        if end_dt <= start_dt:
+            end_dt += timedelta(days=1)
+        return (start_dt, end_dt)
+
+    def _interval_within_slots(
+        self, interval: Tuple[datetime, datetime],
+        slots: List[Tuple[datetime, datetime]],
+    ) -> bool:
+        """True if the interval fits entirely inside one of the available slots."""
+        start_dt, end_dt = interval
+        for slot_start, slot_end in slots:
+            if slot_start <= start_dt and end_dt <= slot_end:
+                return True
+        return False
+
+    def _interval_overlaps(
+        self, interval: Tuple[datetime, datetime],
+        accepted: List[Tuple[datetime, datetime]],
+    ) -> bool:
+        """True if the interval overlaps any already-accepted interval."""
+        start_dt, end_dt = interval
+        for a_start, a_end in accepted:
+            if start_dt < a_end and a_start < end_dt:
+                return True
+        return False
+
     def enforce_timing(
         self,
         planned_tasks: List[PlannedTask],
@@ -279,6 +367,7 @@ class ScheduleService:
         sleep_schedule: SleepSchedule,
         energy_profile: EnergyProfile,
         existing_tasks: Optional[List[PlannedTask]] = None,
+        earliest_start: Optional[time] = None,
     ) -> List[PlannedTask]:
         """
         Assign actual time slots to planned tasks.
@@ -309,33 +398,14 @@ class ScheduleService:
         available_slots = self.get_available_time_slots(
             date, commitments, sleep_schedule, existing_tasks, energy_profile
         )
-        
+
         if not available_slots:
             logger.warning("No available time slots for date", date=date)
             return planned_tasks
-        
-        # Filter out past time slots if scheduling for today
-        now = datetime.now()
-        if base_date.date() == now.date():
-            filtered_slots = []
-            for slot_start, slot_end in available_slots:
-                if slot_end <= now:
-                    logger.info(f"Skipping past slot: {slot_start.strftime('%H:%M')} - {slot_end.strftime('%H:%M')}")
-                    continue
-                elif slot_start < now < slot_end:
-                    # Round up to next 15 minutes
-                    minutes = (now.minute // 15 + 1) * 15
-                    if minutes >= 60:
-                        adjusted = now.replace(hour=(now.hour + 1) % 24, minute=0, second=0, microsecond=0)
-                    else:
-                        adjusted = now.replace(minute=minutes, second=0, microsecond=0)
-                    logger.info(f"Adjusting partial past slot from {slot_start.strftime('%H:%M')} to {adjusted.strftime('%H:%M')}")
-                    filtered_slots.append((adjusted, slot_end))
-                else:
-                    filtered_slots.append((slot_start, slot_end))
-            available_slots = filtered_slots
-            logger.info("Filtered past time slots", remaining_slots=len(available_slots))
-        
+
+        # Honor earliest-start + current-time constraints
+        available_slots = self._apply_time_constraints(available_slots, base_date, earliest_start)
+
         if not available_slots:
             logger.warning("No future time slots available")
             return planned_tasks
@@ -355,17 +425,48 @@ class ScheduleService:
                    slots=[(s[0].strftime('%H:%M'), s[1].strftime('%H:%M')) for s in available_slots])
         
         # ===================================================================
-        # STEP 1: Separate tasks with fixed times from flexible tasks
+        # STEP 1: Separate tasks with fixed times from flexible tasks.
+        #
+        # A "fixed" time only comes from the AI's own notes — it is NOT
+        # authoritative. Before trusting it we validate that it (a) fits inside
+        # a real available slot and (b) doesn't overlap an already-accepted
+        # fixed task. Anything that fails is demoted to flexible so the smart
+        # scheduler re-places it cleanly. This prevents the AI from producing
+        # overlapping blocks or times past the user's sleep window.
         # ===================================================================
+        # Decide acceptance in priority order so higher-priority tasks win conflicts.
+        def _priority_weight(t: PlannedTask) -> int:
+            return 0 if t.priority == Priority.HIGH else 1 if t.priority == Priority.MEDIUM else 2
+
+        accepted_intervals: List[Tuple[datetime, datetime]] = []
+        accepted_fixed_ids = set()
+        for task in sorted(planned_tasks, key=_priority_weight):
+            if not (task.scheduled_start and task.scheduled_end):
+                continue
+            interval = self._parse_fixed_interval(task, base_date)
+            if interval is None:
+                logger.info(f"⚠️ Could not parse fixed time for '{task.task_name}' — treating as flexible")
+                continue
+            if not self._interval_within_slots(interval, available_slots):
+                logger.info(f"⛔ Fixed time for '{task.task_name}' ({task.scheduled_start}-{task.scheduled_end}) is outside available slots — demoting to flexible")
+                continue
+            if self._interval_overlaps(interval, accepted_intervals):
+                logger.info(f"⛔ Fixed time for '{task.task_name}' overlaps another fixed task — demoting to flexible")
+                continue
+            accepted_intervals.append(interval)
+            accepted_fixed_ids.add(id(task))
+
+        # Build final lists in the ORIGINAL order; clear times on demoted tasks.
         fixed_tasks = []
         flexible_tasks = []
-        
         for task in planned_tasks:
-            if task.scheduled_start and task.scheduled_end:
-                # Task has a specific time requirement (from AI notes)
+            if id(task) in accepted_fixed_ids:
                 logger.info(f"🔒 Fixed time task: {task.task_name} at {task.scheduled_start}-{task.scheduled_end}")
                 fixed_tasks.append(task)
             else:
+                if task.scheduled_start or task.scheduled_end:
+                    task.scheduled_start = None
+                    task.scheduled_end = None
                 flexible_tasks.append(task)
         
         # ===================================================================
@@ -378,7 +479,11 @@ class ScheduleService:
             available_slots = self.get_available_time_slots(
                 date, commitments, sleep_schedule, all_existing, energy_profile
             )
-            
+            # Re-apply earliest-start + past-time filtering: get_available_time_slots
+            # returns the FULL day, so without this a flexible task could be placed
+            # this morning (before "now") whenever a fixed task triggered this recompute.
+            available_slots = self._apply_time_constraints(available_slots, base_date, earliest_start)
+
             if not available_slots:
                 logger.warning("No available slots after accounting for fixed tasks")
                 # Return only fixed tasks if no slots remain

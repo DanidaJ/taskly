@@ -13,6 +13,7 @@ import {
   Moon,
   BarChart3,
   Plus,
+  Inbox,
 } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useAuthStore } from '@/stores/authStore';
@@ -25,6 +26,7 @@ import GlobalTimerCompletionPrompt from './GlobalTimerCompletionPrompt';
 const navigation = [
   { name: 'Dashboard', href: '/app', icon: LayoutDashboard },
   { name: 'AI Planner', href: '/app/planner', icon: Sparkles },
+  { name: 'Backlog', href: '/app/backlog', icon: Inbox },
   { name: 'Schedule', href: '/app/schedule', icon: Calendar },
   { name: 'Focus Timer', href: '/app/focus', icon: Brain },
   { name: 'Sleep', href: '/app/sleep', icon: Moon },

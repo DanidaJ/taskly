@@ -94,11 +94,96 @@ def _convert_existing_tasks(raw_tasks: list) -> list:
     return converted
 
 
+def extract_earliest_start_time(text: str):
+    """
+    Parse phrases like 'starting past 10pm', 'start after 22:00', 'I'll begin at 10:30pm'
+    and return a time object representing the earliest the user wants to start.
+    Returns None if no constraint is found.
+    """
+    import re
+    from datetime import time
+
+    text_lower = text.lower()
+
+    # Ordered from most specific to most general to avoid false positives
+    patterns = [
+        # "i will be starting this past/after/at 10pm"
+        r"i(?:'ll| will| would)\s+(?:be\s+)?start(?:ing)?\s+(?:this\s+)?(?:past|after|at|from)\s+(\d{1,2}(?::\d{2})?)\s*(am|pm)?",
+        # "starting past/after/at 10pm"
+        r"start(?:ing)?\s+(?:this\s+)?(?:past|after|at|from)\s+(\d{1,2}(?::\d{2})?)\s*(am|pm)?",
+        # "beginning/begin after/past/at 10pm"
+        r"begin(?:ning)?\s+(?:this\s+)?(?:past|after|at|from)\s+(\d{1,2}(?::\d{2})?)\s*(am|pm)?",
+        # Standalone "past 10pm" / "after 10pm" near schedule/start/time words
+        r"(?:past|after)\s+(\d{1,2}(?::\d{2})?)\s*(am|pm)",  # require am/pm here to avoid false matches
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            time_str = match.group(1)
+            ampm = match.group(2) if match.lastindex and match.lastindex >= 2 else None
+
+            if ':' in time_str:
+                hour, minute = map(int, time_str.split(':'))
+            else:
+                hour = int(time_str)
+                minute = 0
+
+            if ampm == 'pm' and hour != 12:
+                hour += 12
+            elif ampm == 'am' and hour == 12:
+                hour = 0
+            # No am/pm but ≥13 → already 24h format
+            # No am/pm, 1–12 → ambiguous; skip to avoid misclassification
+
+            if 0 <= hour <= 23:
+                logger.info("Extracted earliest start constraint", hour=hour, minute=minute, source=match.group(0))
+                return time(hour, minute)
+
+    return None
+
+
+def extract_task_count(text: str):
+    """
+    Parse an explicit task-count cap from phrases like "4 tasks", "do 3 things",
+    "good with 4 tasks today", "let's do 3 items".
+    Returns the integer count, or None if the user didn't state one.
+    """
+    import re
+
+    text_lower = text.lower()
+
+    word_to_num = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    }
+
+    # Number (digit or word) directly followed by a "task" noun.
+    noun = r"(?:tasks?|things?|items?|to-?dos?|activities|activity)"
+    digit_pattern = rf"\b(\d{{1,2}})\s+{noun}\b"
+    word_pattern = rf"\b({'|'.join(word_to_num)})\s+{noun}\b"
+
+    m = re.search(digit_pattern, text_lower)
+    if m:
+        count = int(m.group(1))
+        if 1 <= count <= 20:
+            logger.info("Extracted task count constraint", count=count, source=m.group(0))
+            return count
+
+    m = re.search(word_pattern, text_lower)
+    if m:
+        count = word_to_num[m.group(1)]
+        logger.info("Extracted task count constraint", count=count, source=m.group(0))
+        return count
+
+    return None
+
+
 def build_user_prompt(request: AIPlanRequest) -> str:
     """Build the user prompt from the request data"""
     from app.services.schedule_service import schedule_service
     from datetime import datetime
-    
+
     context = request.user_context
     now = datetime.now()
     
@@ -142,31 +227,88 @@ def build_user_prompt(request: AIPlanRequest) -> str:
     
     if not existing_tasks_str:
         existing_tasks_str = "  No tasks scheduled yet for this date."
-    
+
     logger.info("Existing tasks for AI awareness", count=len(existing_task_objects))
+
+    # Format backlog items so the AI can schedule directly from them when the
+    # user asks (e.g. "plan 4 things from my backlog"). Use EXACT names so the
+    # frontend can match-and-remove them from the backlog when the plan applies.
+    backlog_items = context.backlog_items or []
+    if backlog_items:
+        priority_rank = {"high": 0, "medium": 1, "low": 2}
+        sorted_backlog = sorted(
+            backlog_items,
+            key=lambda b: priority_rank.get(str(b.get("priority", "medium")).lower(), 1),
+        )
+        backlog_str = "\n".join([
+            f"  📥 {b.get('name', 'Untitled')} "
+            f"({b.get('estimated_minutes', 60)} min, {b.get('priority', 'medium')} priority)"
+            for b in sorted_backlog
+        ])
+    else:
+        backlog_str = "  (Backlog is empty)"
     
     # Calculate available time slots (also considering existing tasks)
     # Convert existing tasks to PlannedTask objects for slot calculation
     existing_planned_tasks = _convert_existing_tasks(existing_task_objects)
-    
+
     available_slots = schedule_service.get_available_time_slots(
         request.target_date,
         context.commitments,
         context.sleep_schedule,
         existing_tasks=existing_planned_tasks if existing_planned_tasks else None
     )
-    
+
+    # Drop slots already in the past when planning for today, so the AI never
+    # suggests a time that's already gone (e.g. "00:00-00:45" at 7pm).
+    available_slots = schedule_service._apply_time_constraints(available_slots, target_dt)
+
+    # Extract explicit task-count cap ("4 things", "do 3 tasks") if the user gave one
+    task_count_cap = extract_task_count(request.raw_tasks_input)
+    task_count_notice = ""
+    if task_count_cap is not None:
+        task_count_notice = (
+            f"\n🔢 **EXACT TASK COUNT: {task_count_cap}**\n"
+            f"The user wants EXACTLY {task_count_cap} task(s). Output EXACTLY {task_count_cap} "
+            f"items in both \"tasks\" and \"plan\". DO NOT add supporting/meta tasks like "
+            f"\"review backlog\", \"select tasks\", \"plan the day\" or \"reflect\" — only the "
+            f"actual {task_count_cap} task(s) the user wants to do.\n"
+        )
+
+    # Extract any user-stated earliest start constraint ("starting past 10pm", etc.)
+    earliest_start = extract_earliest_start_time(request.raw_tasks_input)
+    earliest_start_notice = ""
+    if earliest_start is not None:
+        from datetime import datetime as _dt
+        _base = _dt.strptime(request.target_date, '%Y-%m-%d')
+        _earliest_dt = _dt.combine(_base.date(), earliest_start)
+        # Trim displayed available slots so the AI only sees time it can actually use
+        filtered_slots = []
+        for slot_start, slot_end in available_slots:
+            if slot_end <= _earliest_dt:
+                continue
+            trimmed_start = max(slot_start, _earliest_dt)
+            if trimmed_start < slot_end:
+                filtered_slots.append((trimmed_start, slot_end))
+        available_slots = filtered_slots
+        earliest_start_notice = (
+            f"\n⛔ **USER-STATED EARLIEST START: {earliest_start.strftime('%H:%M')}**\n"
+            f"The user said: \"{request.raw_tasks_input[:120]}...\"\n"
+            f"→ NO task may be scheduled before {earliest_start.strftime('%H:%M')}. This is an absolute constraint.\n"
+        )
+        logger.info("Applied earliest start filter", earliest=earliest_start.strftime('%H:%M'), remaining_slots=len(available_slots))
+
     # Calculate total available hours
     total_available_minutes = sum(
-        int((slot[1] - slot[0]).total_seconds() // 60) 
+        int((slot[1] - slot[0]).total_seconds() // 60)
         for slot in available_slots
     )
     total_available_hours = total_available_minutes / 60
-    
-    logger.info("Available time slots calculated", 
+
+    logger.info("Available time slots calculated",
                 slot_count=len(available_slots),
                 total_hours=round(total_available_hours, 1))
-    
+
     # Format available slots
     slots_str = "\n".join([
         f"  ✅ {slot[0].strftime('%H:%M')} to {slot[1].strftime('%H:%M')} ({int((slot[1] - slot[0]).total_seconds() // 60)} minutes available)"
@@ -193,6 +335,11 @@ def build_user_prompt(request: AIPlanRequest) -> str:
 
 **Already Scheduled Tasks (DO NOT recreate these, they are already on the calendar):**
 {existing_tasks_str}
+
+**📥 Backlog (unscheduled tasks the user saved for "later"):**
+{backlog_str}
+   → When the user asks you to plan "from backlog", pick items from THIS list and
+     schedule them. Use each item's EXACT name. Do not invent new task names.
 
 **Your Blocked Time (Commitments):**
 {commitments_str}
@@ -237,7 +384,8 @@ def build_user_prompt(request: AIPlanRequest) -> str:
 {request.raw_tasks_input}
 
 {schedule_awareness}
-
+{earliest_start_notice}
+{task_count_notice}
 **CRITICAL SCHEDULING RULES:**
 
 1. **RESPECT COMMITMENTS**: Tasks can ONLY be scheduled in the available time slots listed above. 
@@ -434,12 +582,26 @@ class AIService:
                     "priority": priority,
                     "notes": p.get("notes"),
                 })
-            
+
+            # Enforce an explicit task-count cap if the user stated one
+            # ("4 things today"). The AI sometimes adds meta tasks anyway, so we
+            # trim here keeping the highest-priority items.
+            task_count_cap = extract_task_count(request.raw_tasks_input)
+            if task_count_cap is not None and len(plan) > task_count_cap:
+                priority_rank = {"high": 0, "medium": 1, "low": 2}
+                plan.sort(key=lambda p: priority_rank.get(p.get("priority", "medium"), 1))
+                plan = plan[:task_count_cap]
+                kept_names = {p["task_name"].lower().strip() for p in plan}
+                trimmed_tasks = [t for t in tasks if t["name"].lower().strip() in kept_names]
+                tasks = trimmed_tasks if trimmed_tasks else tasks[:task_count_cap]
+                logger.info("Trimmed plan to task-count cap", cap=task_count_cap, kept=len(plan))
+
             # Apply schedule enforcement to ensure tasks don't conflict with commitments
             plan = self._enforce_schedule_constraints(
-                plan, 
+                plan,
                 request.target_date,
-                request.user_context
+                request.user_context,
+                earliest_start=extract_earliest_start_time(request.raw_tasks_input),
             )
             
             # Note: scheduled_start and scheduled_end are already set by _enforce_schedule_constraints
@@ -459,10 +621,11 @@ class AIService:
             return self._generate_fallback_plan(request.raw_tasks_input)
     
     def _enforce_schedule_constraints(
-        self, 
+        self,
         plan_items: list,
         target_date: str,
-        user_context: UserContext
+        user_context: UserContext,
+        earliest_start=None,
     ) -> list:
         """Enforce schedule constraints using the schedule service"""
         from app.services.schedule_service import schedule_service
@@ -527,7 +690,8 @@ class AIService:
                 user_context.commitments,
                 user_context.sleep_schedule,
                 user_context.energy_profile,
-                existing_tasks if existing_tasks else None
+                existing_tasks if existing_tasks else None,
+                earliest_start=earliest_start,
             )
             
             logger.info("Schedule enforcement complete", scheduled_count=len(scheduled_tasks))

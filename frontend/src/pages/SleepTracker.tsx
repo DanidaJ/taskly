@@ -15,6 +15,8 @@ import {
   Sparkles,
   Brain,
   BarChart3,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import { Button } from '@/components/ui';
 import { sleepEntryService, sleepGoalService, SleepGoal as SleepGoalDTO } from '@/services/api';
@@ -54,6 +56,8 @@ export default function SleepTracker() {
   const [entries, setEntries] = useState<SleepEntry[]>([]);
   const [goal, setGoal] = useState<SleepGoal>(DEFAULT_GOAL);
   const [showAddEntry, setShowAddEntry] = useState(false);
+  const [editingEntry, setEditingEntry] = useState<SleepEntry | null>(null);
+  const [isSavingEntry, setIsSavingEntry] = useState(false);
   const [showGoalSettings, setShowGoalSettings] = useState(false);
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [newEntry, setNewEntry] = useState({
@@ -122,8 +126,49 @@ export default function SleepTracker() {
     return duration;
   };
 
-  const handleAddEntry = async () => {
+  const resetNewEntry = () => {
+    setNewEntry({
+      date: format(new Date(), 'yyyy-MM-dd'),
+      bedtime: '22:30',
+      wakeTime: '06:30',
+      quality: 4,
+      notes: '',
+    });
+  };
+
+  const openAddEntry = (date?: string) => {
+    setEditingEntry(null);
+    setNewEntry({
+      date: date || format(new Date(), 'yyyy-MM-dd'),
+      bedtime: '22:30',
+      wakeTime: '06:30',
+      quality: 4,
+      notes: '',
+    });
+    setShowAddEntry(true);
+  };
+
+  const openEditEntry = (entry: SleepEntry) => {
+    setEditingEntry(entry);
+    setNewEntry({
+      date: entry.date,
+      bedtime: entry.bedtime,
+      wakeTime: entry.wakeTime,
+      quality: entry.quality,
+      notes: entry.notes || '',
+    });
+    setShowAddEntry(true);
+  };
+
+  const closeEntryModal = () => {
+    setShowAddEntry(false);
+    setEditingEntry(null);
+    resetNewEntry();
+  };
+
+  const handleSaveEntry = async () => {
     const duration = calculateDuration(newEntry.bedtime, newEntry.wakeTime);
+    setIsSavingEntry(true);
 
     try {
       const saved: any = await sleepEntryService.save({
@@ -145,23 +190,42 @@ export default function SleepTracker() {
         duration: saved.duration,
       };
 
+      // When editing and the date was changed, the upsert created an entry at the
+      // new date — remove the stale one left behind at the original date.
+      if (editingEntry && editingEntry.date !== entry.date) {
+        await sleepEntryService.delete(editingEntry.id).catch((error) => {
+          console.error('Failed to remove stale sleep entry:', error);
+        });
+      }
+
       setEntries(prev => [
-        ...prev.filter(e => e.date !== entry.date),
+        ...prev.filter(e => e.date !== entry.date && e.id !== editingEntry?.id),
         entry,
       ]);
 
-      setShowAddEntry(false);
-      toast.success('Sleep entry logged!');
-      setNewEntry({
-        date: format(new Date(), 'yyyy-MM-dd'),
-        bedtime: '22:30',
-        wakeTime: '06:30',
-        quality: 4,
-        notes: '',
-      });
+      toast.success(editingEntry ? 'Sleep entry updated!' : 'Sleep entry logged!');
+      closeEntryModal();
     } catch (error) {
       console.error('Failed to save sleep entry:', error);
-      toast.error('Failed to log sleep entry. Please try again.');
+      toast.error('Failed to save sleep entry. Please try again.');
+    } finally {
+      setIsSavingEntry(false);
+    }
+  };
+
+  const handleDeleteEntry = async () => {
+    if (!editingEntry) return;
+    setIsSavingEntry(true);
+    try {
+      await sleepEntryService.delete(editingEntry.id);
+      setEntries(prev => prev.filter(e => e.id !== editingEntry.id));
+      toast.success('Sleep entry deleted');
+      closeEntryModal();
+    } catch (error) {
+      console.error('Failed to delete sleep entry:', error);
+      toast.error('Failed to delete entry. Please try again.');
+    } finally {
+      setIsSavingEntry(false);
     }
   };
 
@@ -277,7 +341,7 @@ export default function SleepTracker() {
           <Button
             variant="primary"
             size="sm"
-            onClick={() => setShowAddEntry(true)}
+            onClick={() => openAddEntry()}
           >
             Log Sleep
           </Button>
@@ -314,13 +378,21 @@ export default function SleepTracker() {
           </div>
           
           {todayEntry && (
-            <div className="text-right">
+            <div className="flex flex-col items-end gap-2">
               <div className={clsx(
                 'text-4xl font-bold',
                 QUALITY_COLORS[todayEntry.quality]
               )}>
                 {todayEntry.quality}/5
               </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                leftIcon={<Pencil className="w-4 h-4" />}
+                onClick={() => openEditEntry(todayEntry)}
+              >
+                Edit
+              </Button>
             </div>
           )}
         </div>
@@ -358,17 +430,20 @@ export default function SleepTracker() {
             const isToday = isSameDay(day, new Date());
             
             return (
-              <div
+              <button
+                type="button"
                 key={day.toISOString()}
+                onClick={() => entry ? openEditEntry(entry) : openAddEntry(format(day, 'yyyy-MM-dd'))}
+                title={entry ? 'Edit sleep entry' : 'Log sleep for this day'}
                 className={clsx(
-                  'p-3 rounded-apple text-center transition-all',
+                  'p-3 rounded-apple text-center transition-all cursor-pointer hover:ring-2 hover:ring-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-400',
                   isToday && 'ring-2 ring-blue-500',
                   entry ? QUALITY_BG[entry.quality] : 'bg-gray-100 border border-gray-200'
                 )}
               >
                 <div className="text-xs text-gray-600">{format(day, 'EEE')}</div>
                 <div className="text-sm font-semibold text-gray-800">{format(day, 'd')}</div>
-                
+
                 {entry ? (
                   <div className="mt-2">
                     <div className={clsx('text-xs font-medium', QUALITY_COLORS[entry.quality])}>
@@ -390,7 +465,7 @@ export default function SleepTracker() {
                 ) : (
                   <div className="mt-2 text-xs text-gray-500">-</div>
                 )}
-              </div>
+              </button>
             );
           })}
         </div>
@@ -488,7 +563,7 @@ export default function SleepTracker() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
-            onClick={() => setShowAddEntry(false)}
+            onClick={closeEntryModal}
           >
             <motion.div
               initial={{ scale: 0.95 }}
@@ -497,7 +572,9 @@ export default function SleepTracker() {
               className="glass-card w-full max-w-md"
               onClick={(e) => e.stopPropagation()}
             >
-              <h3 className="text-xl font-semibold text-gray-900 mb-4">Log Sleep</h3>
+              <h3 className="text-xl font-semibold text-gray-900 mb-4">
+                {editingEntry ? 'Edit Sleep' : 'Log Sleep'}
+              </h3>
               
               <div className="space-y-4">
                 <div>
@@ -565,19 +642,31 @@ export default function SleepTracker() {
                 </div>
 
                 <div className="flex gap-3">
+                  {editingEntry && (
+                    <Button
+                      variant="ghost"
+                      isLoading={isSavingEntry}
+                      leftIcon={<Trash2 className="w-4 h-4" />}
+                      className="text-red-600 hover:bg-red-50"
+                      onClick={handleDeleteEntry}
+                    >
+                      Delete
+                    </Button>
+                  )}
                   <Button
                     variant="ghost"
                     className="flex-1"
-                    onClick={() => setShowAddEntry(false)}
+                    onClick={closeEntryModal}
                   >
                     Cancel
                   </Button>
                   <Button
                     variant="primary"
                     className="flex-1"
-                    onClick={handleAddEntry}
+                    isLoading={isSavingEntry}
+                    onClick={handleSaveEntry}
                   >
-                    Save Entry
+                    {editingEntry ? 'Update Entry' : 'Save Entry'}
                   </Button>
                 </div>
               </div>

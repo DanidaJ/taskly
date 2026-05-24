@@ -314,6 +314,31 @@ class SupabaseDB:
         response = self.client.table('routine_templates').delete().eq('id', template_id).execute()
         return response.data
 
+    # ============================================
+    # Backlog Items
+    # ============================================
+
+    async def get_backlog_items(self, user_id: str):
+        response = self.client.table('backlog_items').select('*').eq('user_id', user_id).order('created_at', desc=True).execute()
+        return response.data
+
+    async def get_backlog_item(self, item_id: str):
+        response = self.client.table('backlog_items').select('*').eq('id', item_id).execute()
+        return response.data[0] if response.data else None
+
+    async def create_backlog_item(self, item_data: dict):
+        response = self.client.table('backlog_items').insert(item_data).execute()
+        return response.data[0] if response.data else None
+
+    async def update_backlog_item(self, item_id: str, updates: dict):
+        updates['updated_at'] = 'now()'
+        response = self.client.table('backlog_items').update(updates).eq('id', item_id).execute()
+        return response.data[0] if response.data else None
+
+    async def delete_backlog_item(self, item_id: str):
+        response = self.client.table('backlog_items').delete().eq('id', item_id).execute()
+        return response.data
+
     # ------------------------------------------------------------------
     # Notifications
     # ------------------------------------------------------------------

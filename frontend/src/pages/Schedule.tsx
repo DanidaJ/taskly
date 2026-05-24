@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { format, startOfMonth, endOfMonth, subMonths, addMonths } from 'date-fns';
+import { format, startOfMonth, endOfMonth, subMonths, addMonths, subDays, addDays, eachDayOfInterval } from 'date-fns';
 import {
   Calendar,
   ChevronLeft,
@@ -21,20 +21,33 @@ import {
   CalendarPlus,
   RefreshCw,
 } from 'lucide-react';
-import { useTaskStore, useUserProfileStore } from '@/stores';
+import { useTaskStore, useUserProfileStore, useFocusCountdownStore } from '@/stores';
 import { PlannedTask } from '@/types';
+import { activeFocusTimerService, focusSessionService } from '@/services/api';
 import { Button, Input, Modal, Textarea } from '@/components/ui';
 import { CognitiveLoadBadge, PriorityBadge } from '@/components/ui/Badge';
 import { CalendarView } from '@/components/calendar';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
-import { buildFocusTaskUrl } from '@/utils';
+import { buildFocusTaskUrl, parseDuration } from '@/utils';
 import { getTaskBadgeClasses, getTaskLifecycleTimeline, getTaskStartBadge, getTaskStatusBadge, getTaskTimerBadge, getTaskTimerReason, getTaskUserNotes } from '@/utils/taskLifecycle';
 import TaskStartConfirmModal, { getStartContext, StartContext } from '@/components/TaskStartConfirmModal';
 import ReschedulePanel from '@/components/ReschedulePanel';
 
 type ViewMode = 'list' | 'calendar';
+
+// Below this much time remaining, finishing "early" is effectively finishing on
+// time — so we skip the confirmation prompt and just complete the task.
+const EARLY_FINISH_CONFIRM_SECONDS = 5 * 60;
+
+// Estimated seconds left on an in-progress task, based on when it actually
+// started and its planned duration.
+const getInProgressRemainingSeconds = (task: PlannedTask): number => {
+  const startMs = task.actual_start ? new Date(task.actual_start).getTime() : Date.now();
+  const plannedSeconds = Math.max(1, parseDuration(task.suggested_duration)) * 60;
+  return Math.round((startMs + plannedSeconds * 1000 - Date.now()) / 1000);
+};
 
 // Color mapping for cognitive types (matching CalendarView)
 const cognitiveColors: Record<string, string> = {
@@ -67,7 +80,10 @@ export default function Schedule() {
 
   const { plannedTasks, updatePlannedTask, deletePlannedTask, tasks, loadPlanFromDatabase, loadPlansForDateRange, plansByDate, getMissedTasks, rescheduleTask } = useTaskStore();
   const { commitments } = useUserProfileStore();
+  const clearSharedCountdown = useFocusCountdownStore((s) => s.clearSnapshot);
   const [rescheduleLoading, setRescheduleLoading] = useState<string | null>(null);
+  const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
+  const [taskToCompleteEarly, setTaskToCompleteEarly] = useState<PlannedTask | null>(null);
 
   // Missed-task enforcement runs globally in Layout, so we just read the list here.
   const missedTasks = getMissedTasks();
@@ -214,6 +230,77 @@ export default function Schedule() {
     }
   };
 
+  // Complete an in-progress task from the details modal. Mirrors the FocusTimer
+  // "finish early" workflow: marks the task completed, clears the live focus
+  // timer if it belongs to this task (so it stops counting / won't fire the
+  // completion prompt afterwards), and records the elapsed time as a focus
+  // session so analytics stay consistent regardless of where it's finished.
+  const handleEndInProgressTask = async (task: PlannedTask) => {
+    setCompletingTaskId(task.id);
+    const endDate = new Date();
+    const nowIso = endDate.toISOString();
+    const startIso = task.actual_start || nowIso;
+
+    // Elapsed time, capped at the planned duration so a long-forgotten "in
+    // progress" task doesn't record an absurd session length.
+    const startMs = new Date(startIso).getTime();
+    const plannedSeconds = Math.max(1, parseDuration(task.suggested_duration)) * 60;
+    const rawElapsed = Math.round((endDate.getTime() - startMs) / 1000);
+    const elapsedSeconds = Math.min(plannedSeconds, Math.max(60, rawElapsed));
+
+    try {
+      await updatePlannedTask(task.id, {
+        status: 'completed',
+        actual_start: startIso,
+        actual_end: nowIso,
+      });
+    } catch (error) {
+      console.error('Failed to complete task:', error);
+      toast.error('Failed to complete task');
+      setCompletingTaskId(null);
+      return;
+    }
+
+    // Stop the live timer if it is for this task.
+    try {
+      const serverTimer = await activeFocusTimerService.get();
+      if (serverTimer && serverTimer.task_id === task.id) {
+        await activeFocusTimerService.clear();
+        clearSharedCountdown();
+      }
+    } catch (error) {
+      console.error('Failed to clear active focus timer:', error);
+    }
+
+    // Best-effort focus session record (don't block completion on it).
+    focusSessionService.save({
+      task_id: task.id,
+      task_name: task.task_name,
+      start_time: startIso,
+      end_time: nowIso,
+      duration: elapsedSeconds,
+      mode: 'focus',
+      completed: true,
+      session_date: format(endDate, 'yyyy-MM-dd'),
+    }).catch((error) => {
+      console.error('Failed to record focus session:', error);
+    });
+
+    toast.success('Task completed — nice work!');
+    setCompletingTaskId(null);
+    setSelectedTask(null);
+  };
+
+  // Gate completion behind a confirmation only when a meaningful amount of the
+  // planned time is left. In the final few minutes, just complete it.
+  const requestCompleteTask = (task: PlannedTask) => {
+    if (getInProgressRemainingSeconds(task) > EARLY_FINISH_CONFIRM_SECONDS) {
+      setTaskToCompleteEarly(task);
+      return;
+    }
+    handleEndInProgressTask(task);
+  };
+
   const handleViewTask = (task: PlannedTask) => {
     setSelectedTask(task);
     setEditedTask({ ...task });
@@ -261,9 +348,22 @@ export default function Schedule() {
     return tasks.find((t) => t.id === plannedTask.task_id);
   };
 
-  const completedCount = plannedTasks.filter((t) => t.status === 'completed').length;
-  const progressPercent = plannedTasks.length > 0 
-    ? Math.round((completedCount / plannedTasks.length) * 100)
+  // The calendar shows a 7-day window centered on the selected date (±3 days,
+  // matching CalendarView). Scope the "Weekly Overview" progress to that window
+  // instead of every task loaded in the store (calendar mode preloads months of
+  // plans, which otherwise inflates the count).
+  const calendarWeekTasks = useMemo(() => {
+    const dates = eachDayOfInterval({
+      start: subDays(selectedDate, 3),
+      end: addDays(selectedDate, 3),
+    }).map((day) => format(day, 'yyyy-MM-dd'));
+    return dates.flatMap((date) => plansByDate[date]?.tasks || []);
+  }, [selectedDate, plansByDate]);
+
+  const progressTasks = viewMode === 'calendar' ? calendarWeekTasks : plannedTasks;
+  const completedCount = progressTasks.filter((t) => t.status === 'completed').length;
+  const progressPercent = progressTasks.length > 0
+    ? Math.round((completedCount / progressTasks.length) * 100)
     : 0;
   const selectedTaskStatusBadge = selectedTask ? getTaskStatusBadge(selectedTask.status) : null;
   const selectedTaskStartBadge = selectedTask ? getTaskStartBadge(selectedTask) : null;
@@ -320,7 +420,7 @@ export default function Schedule() {
       </div>
 
       {/* Progress Bar */}
-      {plannedTasks.length > 0 && (
+      {progressTasks.length > 0 && (
         <div className="glass-card flex items-center justify-between">
           <div className="flex items-center gap-3">
             <Calendar className="w-5 h-5 text-blue-500" />
@@ -330,7 +430,7 @@ export default function Schedule() {
           </div>
           <div className="flex items-center gap-3">
             <div className="text-sm text-gray-600">
-              {completedCount}/{plannedTasks.length} completed
+              {completedCount}/{progressTasks.length} completed
             </div>
             <div className="w-24 h-2 bg-gray-200 rounded-full overflow-hidden">
               <motion.div
@@ -960,37 +1060,106 @@ export default function Schedule() {
             </div>
 
             {/* Actions */}
-            <div className="flex gap-3 mt-5 pt-1">
-              <Button
-                variant="ghost"
-                onClick={() => setSelectedTask(null)}
-                className="flex-1"
-              >
-                Close
-              </Button>
-              {!['completed', 'skipped', 'cancelled', 'missed'].includes(selectedTask.status) && (
+            <div className="mt-5 pt-1 space-y-2">
+              {/* In-progress tasks: resume the timer or complete the task here */}
+              {selectedTask.status === 'in_progress' && (
+                <div className="flex gap-3">
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      navigate(
+                        buildFocusTaskUrl(selectedTask, {
+                          autoStart: false,
+                          date: format(selectedDate, 'yyyy-MM-dd'),
+                        })
+                      );
+                      setSelectedTask(null);
+                    }}
+                    className="flex-1 flex items-center justify-center gap-2"
+                  >
+                    <Play className="w-4 h-4" />
+                    Resume Focus
+                  </Button>
+                  <Button
+                    variant="primary"
+                    isLoading={completingTaskId === selectedTask.id}
+                    onClick={() => requestCompleteTask(selectedTask)}
+                    className="flex-1 flex items-center justify-center gap-2 bg-green-600 hover:bg-green-700 active:bg-green-800 focus:ring-green-500"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    Complete task
+                  </Button>
+                </div>
+              )}
+
+              <div className="flex gap-3">
                 <Button
-                  variant="secondary"
+                  variant="ghost"
+                  onClick={() => setSelectedTask(null)}
+                  className="flex-1"
+                >
+                  Close
+                </Button>
+                {!['completed', 'skipped', 'cancelled', 'missed', 'in_progress'].includes(selectedTask.status) && (
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      handleStartTask(selectedTask);
+                      setSelectedTask(null);
+                    }}
+                    className="flex-1 flex items-center justify-center gap-2"
+                  >
+                    <Play className="w-4 h-4" />
+                    Start Focus
+                  </Button>
+                )}
+                <Button
+                  variant="primary"
                   onClick={() => {
-                    handleStartTask(selectedTask);
-                    setSelectedTask(null);
+                    setIsEditModalOpen(true);
+                    setEditedTask({ ...selectedTask });
                   }}
                   className="flex-1 flex items-center justify-center gap-2"
                 >
-                  <Play className="w-4 h-4" />
-                  Start Focus
+                  <Edit className="w-4 h-4" />
+                  Edit
                 </Button>
-              )}
+              </div>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Finish-early confirmation — only shown when meaningful time remains */}
+      {taskToCompleteEarly && (
+        <Modal isOpen onClose={() => setTaskToCompleteEarly(null)}>
+          <div className="space-y-4">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Finish early?</h2>
+              <p className="text-sm text-gray-700 mt-1">
+                You still have about {Math.max(1, Math.ceil(getInProgressRemainingSeconds(taskToCompleteEarly) / 60))} minutes left on{' '}
+                <span className="font-medium">{taskToCompleteEarly.task_name}</span>. Mark it complete now?
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <Button
+                variant="ghost"
+                className="flex-1"
+                onClick={() => setTaskToCompleteEarly(null)}
+              >
+                Keep going
+              </Button>
               <Button
                 variant="primary"
+                isLoading={completingTaskId === taskToCompleteEarly.id}
+                className="flex-1 bg-green-600 hover:bg-green-700 active:bg-green-800 focus:ring-green-500"
                 onClick={() => {
-                  setIsEditModalOpen(true);
-                  setEditedTask({ ...selectedTask });
+                  const task = taskToCompleteEarly;
+                  setTaskToCompleteEarly(null);
+                  handleEndInProgressTask(task);
                 }}
-                className="flex-1 flex items-center justify-center gap-2"
               >
-                <Edit className="w-4 h-4" />
-                Edit
+                Yes, complete
               </Button>
             </div>
           </div>

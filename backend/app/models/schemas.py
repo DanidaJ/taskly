@@ -364,6 +364,9 @@ class UserContext(BaseModel):
     preferences: UserPreferencesLite
     recent_logs: List[DailyLogLite] = []
     existing_plans: Optional[List[dict]] = None
+    # Unscheduled backlog items the AI may pull from when the user asks it to
+    # plan "from backlog". Each dict carries name/estimated_minutes/priority.
+    backlog_items: Optional[List[dict]] = None
 
 
 # AI Request Models
@@ -672,3 +675,51 @@ class UserPatternResponse(UserPatternBase):
 
     class Config:
         from_attributes = True
+
+
+# ============================================
+# Backlog Item Models
+# ============================================
+# Unscheduled tasks the user wants to do "eventually".
+# When scheduled, a backlog item is converted into a planned_task
+# and removed from the backlog.
+
+class BacklogItemBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    estimated_minutes: int = Field(default=60, ge=1, le=480)
+    priority: str = Field(default='medium')  # 'low' | 'medium' | 'high'
+    cognitive_load: str = Field(default='light_focus')
+    tags: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+
+class BacklogItemCreate(BacklogItemBase):
+    pass
+
+
+class BacklogItemUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    estimated_minutes: Optional[int] = Field(default=None, ge=1, le=480)
+    priority: Optional[str] = None
+    cognitive_load: Optional[str] = None
+    tags: Optional[List[str]] = None
+    notes: Optional[str] = None
+
+
+class BacklogItemResponse(BacklogItemBase):
+    id: str
+    user_id: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BacklogScheduleRequest(BaseModel):
+    """Request to schedule a backlog item onto a specific date."""
+    date: str  # YYYY-MM-DD
+    scheduled_start: Optional[str] = None  # HH:MM, if user picked a specific time
+    scheduled_end: Optional[str] = None    # HH:MM, computed from start + duration if not provided

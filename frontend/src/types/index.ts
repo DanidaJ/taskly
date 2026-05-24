@@ -152,6 +152,14 @@ export interface UserContext {
   preferences: UserPreferences;
   recent_logs: DailyLog[];
   existing_plans?: DailyPlan[];
+  // Unscheduled backlog items the AI may schedule from
+  backlog_items?: {
+    id: string;
+    name: string;
+    estimated_minutes: number;
+    priority: 'low' | 'medium' | 'high';
+    notes?: string | null;
+  }[];
 }
 
 // AI planning request

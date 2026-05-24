@@ -16,7 +16,7 @@ import {
   Zap,
   Brain,
 } from 'lucide-react';
-import { useTaskStore, useUserProfileStore, useUserPatternsStore } from '@/stores';
+import { useTaskStore, useUserProfileStore, useUserPatternsStore, useBacklogStore } from '@/stores';
 import { aiService } from '@/services';
 import { focusSessionService, sleepEntryService } from '@/services/api';
 import { AIPlanResponse, UserContext } from '@/types';
@@ -57,6 +57,16 @@ export default function PlannerChat() {
     recentLogs,
   } = useUserProfileStore();
   const { patterns, addPattern, getPattern } = useUserPatternsStore();
+  const {
+    items: backlogItems,
+    loadItems: loadBacklogItems,
+    removeItem: removeBacklogItem,
+  } = useBacklogStore();
+
+  // Load backlog so the AI can schedule directly from it.
+  useEffect(() => {
+    loadBacklogItems();
+  }, [loadBacklogItems]);
 
   // Detect target date from user input
   const detectTargetDate = (input: string): string => {
@@ -206,6 +216,13 @@ export default function PlannerChat() {
       },
       recent_logs: recentLogs || [],
       existing_plans: relevantPlans.length > 0 ? relevantPlans : undefined,
+      backlog_items: (backlogItems || []).map((b) => ({
+        id: b.id,
+        name: b.name,
+        estimated_minutes: b.estimated_minutes,
+        priority: b.priority,
+        notes: b.notes,
+      })),
     };
   };
 
@@ -513,6 +530,19 @@ export default function PlannerChat() {
   const handleApplyPlan = async () => {
     if (pendingPlan) {
       await applyAIPlan(pendingPlan, targetDate);
+
+      // If the AI scheduled any backlog items (matched by exact name), remove
+      // them from the backlog now that they live on the calendar.
+      const plannedNames = new Set(
+        pendingPlan.plan.map((p) => p.task_name.toLowerCase().trim())
+      );
+      const scheduledFromBacklog = (backlogItems || []).filter((b) =>
+        plannedNames.has(b.name.toLowerCase().trim())
+      );
+      if (scheduledFromBacklog.length > 0) {
+        await Promise.all(scheduledFromBacklog.map((b) => removeBacklogItem(b.id)));
+      }
+
       toast.success('Plan applied to your schedule!');
       
       const confirmMessage: ChatMessage = {

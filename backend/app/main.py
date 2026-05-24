@@ -18,6 +18,7 @@ from app.api import (
     profile_router,
     data_router,
     recurring_router,
+    backlog_router,
 )
 
 # Configure structured logging
@@ -160,6 +161,7 @@ app.include_router(notification_router, prefix="/api/v1")
 app.include_router(profile_router, prefix="/api/v1")
 app.include_router(data_router, prefix="/api/v1")
 app.include_router(recurring_router, prefix="/api/v1")
+app.include_router(backlog_router, prefix="/api/v1")
 
 
 # Health check endpoints

@@ -421,7 +421,7 @@ export default function Dashboard() {
                       {task.priority}
                     </span>
                     {/* Quick Focus Button */}
-                    {!['completed', 'cancelled', 'skipped', 'missed'].includes(task.status) && (
+                    {!['completed', 'cancelled', 'skipped', 'missed', 'in_progress'].includes(task.status) && (
                       <button
                         onClick={() => handleStartTaskFocus(task)}
                         className="opacity-0 group-hover:opacity-100 p-2 rounded-apple bg-blue-500/20 text-blue-600 hover:bg-blue-500/30 transition-all"

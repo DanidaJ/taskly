@@ -481,9 +481,26 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     const missedTaskIds: string[] = [];
     const updatedTasks = plan.tasks.map((task) => {
       if (task.status !== 'pending' || !task.scheduled_end) return task;
+
+      // Guard 1: if the start window hasn't opened yet, the task cannot be missed.
+      // Handles late-night tasks (e.g. 23:00 start at 8 PM) without complex logic.
+      if (task.scheduled_start) {
+        const [sh, sm] = task.scheduled_start.split(':').map(Number);
+        const startTime = new Date(now);
+        startTime.setHours(sh, sm, 0, 0);
+        if (startTime > now) return task;
+      }
+
       const [endH, endM] = task.scheduled_end.split(':').map(Number);
       const endTime = new Date(now);
       endTime.setHours(endH, endM, 0, 0);
+      // Guard 2: cross-midnight task (e.g. 23:00–00:30): end belongs to NEXT day.
+      if (task.scheduled_start) {
+        const [startH, startM] = task.scheduled_start.split(':').map(Number);
+        if (endH * 60 + endM <= startH * 60 + startM) {
+          endTime.setDate(endTime.getDate() + 1);
+        }
+      }
       endTime.setMinutes(endTime.getMinutes() + GRACE_MINUTES);
       if (now > endTime) {
         changed = true;

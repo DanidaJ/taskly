@@ -12,6 +12,7 @@ import Auth from '@/pages/Auth';
 import FocusTimer from '@/pages/FocusTimer';
 import SleepTracker from '@/pages/SleepTracker';
 import Analytics from '@/pages/Analytics';
+import Backlog from '@/pages/Backlog';
 import { Home, Features, HowItWorks, About } from '@/pages/landing';
 import { useEffect } from 'react';
 import toast from 'react-hot-toast';
@@ -107,6 +108,7 @@ function App() {
         >
           <Route index element={<Dashboard />} />
           <Route path="planner" element={<Planner />} />
+          <Route path="backlog" element={<Backlog />} />
           <Route path="schedule" element={<Schedule />} />
           <Route path="focus" element={<FocusTimer />} />
           <Route path="sleep" element={<SleepTracker />} />

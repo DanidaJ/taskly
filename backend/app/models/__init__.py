@@ -87,6 +87,13 @@ from .schemas import (
     UserPatternBase,
     UserPatternUpsert,
     UserPatternResponse,
+
+    # Backlog models
+    BacklogItemBase,
+    BacklogItemCreate,
+    BacklogItemUpdate,
+    BacklogItemResponse,
+    BacklogScheduleRequest,
 )
 
 __all__ = [
@@ -151,4 +158,9 @@ __all__ = [
     "UserPatternBase",
     "UserPatternUpsert",
     "UserPatternResponse",
+    "BacklogItemBase",
+    "BacklogItemCreate",
+    "BacklogItemUpdate",
+    "BacklogItemResponse",
+    "BacklogScheduleRequest",
 ]
