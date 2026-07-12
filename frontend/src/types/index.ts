@@ -92,6 +92,7 @@ export interface SleepSchedule {
   wake_time: string; // HH:mm format
   sleep_time: string;
   wind_down_minutes: number;
+  preferred_end_time?: string | null; // HH:mm hard cap for the AI scheduler
   updated_at?: string;
 }
 
@@ -108,12 +109,19 @@ export interface UserPreferences {
   updated_at?: string;
 }
 
-// Fixed commitment
+// Fixed commitment OR daily routine — both are recurring time blocks the AI
+// scheduler skips. The `type` field is purely for UX framing in Settings.
+export type CommitmentType =
+  | 'work' | 'school' | 'meeting' | 'appointment' | 'other'
+  | 'meal' | 'exercise' | 'wind_down' | 'personal';
+
+export const ROUTINE_TYPES: CommitmentType[] = ['meal', 'exercise', 'wind_down', 'personal'];
+
 export interface Commitment {
   id?: string;
   user_id?: string;
   name: string;
-  type: 'work' | 'school' | 'meeting' | 'appointment' | 'other';
+  type: CommitmentType;
   start_time: string;
   end_time: string;
   days_of_week: number[]; // 0-6, Sunday-Saturday
@@ -159,6 +167,17 @@ export interface UserContext {
     estimated_minutes: number;
     priority: 'low' | 'medium' | 'high';
     notes?: string | null;
+  }[];
+  // Active multi-session projects the AI advances in realistic daily chunks
+  projects?: {
+    name: string;
+    total_hours: number;
+    hours_completed: number;
+    deadline?: string | null;
+    weekly_hours_target?: number | null;
+    status: string;
+    priority: 'low' | 'medium' | 'high';
+    subtasks: { name: string; status: string }[];
   }[];
 }
 

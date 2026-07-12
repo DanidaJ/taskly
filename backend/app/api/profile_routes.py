@@ -185,10 +185,12 @@ async def create_commitment(
         )
     
     # Map API fields to database fields
+    type_value = commitment.type.value if hasattr(commitment.type, "value") else str(commitment.type)
     commitment_data = {
         "id": str(uuid.uuid4()),
         "user_id": current_user["user_id"],
         "name": commitment.name,
+        "type": type_value,
         "start_time": commitment.start_time,
         "end_time": commitment.end_time,
         "days_of_week": commitment.days_of_week,

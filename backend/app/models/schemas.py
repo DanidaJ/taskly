@@ -188,6 +188,10 @@ class SleepScheduleBase(BaseModel):
     wake_time: str = "07:00"
     sleep_time: str = "23:00"
     wind_down_minutes: int = Field(default=30, ge=0, le=120)
+    # Hard cap on when the AI may schedule tasks ("done by" time). Separate from
+    # sleep_time so night owls can stay up without the scheduler filling that time
+    # with work. None → fall back to sleep_time − wind_down_minutes.
+    preferred_end_time: Optional[str] = None  # HH:MM
 
 
 class SleepScheduleCreate(SleepScheduleBase):
@@ -232,11 +236,17 @@ class UserPreferences(UserPreferencesBase):
 
 # Commitment Models
 class CommitmentType(str, Enum):
+    # Fixed work-style commitments
     WORK = "work"
     SCHOOL = "school"
     MEETING = "meeting"
     APPOINTMENT = "appointment"
     OTHER = "other"
+    # Daily personal routines (same scheduler treatment — time the AI skips)
+    MEAL = "meal"
+    EXERCISE = "exercise"
+    WIND_DOWN = "wind_down"
+    PERSONAL = "personal"
 
 
 class CommitmentBase(BaseModel):
@@ -261,7 +271,7 @@ class Commitment(BaseModel):
     end_time: str
     days_of_week: List[int]
     is_recurring: bool = True  # Mapped from is_active in DB
-    type: CommitmentType = CommitmentType.WORK  # Not in DB, default value
+    type: CommitmentType = CommitmentType.WORK
     created_at: datetime
 
     class Config:
@@ -315,6 +325,7 @@ class SleepScheduleLite(BaseModel):
     wake_time: str = "07:00"
     sleep_time: str = "23:00"
     wind_down_minutes: int = 30
+    preferred_end_time: Optional[str] = None  # HH:MM hard cap for the AI scheduler
     id: Optional[str] = None
     user_id: Optional[str] = None
     updated_at: Optional[str] = None
@@ -367,6 +378,10 @@ class UserContext(BaseModel):
     # Unscheduled backlog items the AI may pull from when the user asks it to
     # plan "from backlog". Each dict carries name/estimated_minutes/priority.
     backlog_items: Optional[List[dict]] = None
+    # Active multi-session projects. The AI schedules a realistic daily chunk
+    # against these (not the whole project). Each dict carries
+    # name/total_hours/hours_completed/deadline/weekly_hours_target/subtasks.
+    projects: Optional[List[dict]] = None
 
 
 # AI Request Models
@@ -723,3 +738,96 @@ class BacklogScheduleRequest(BaseModel):
     date: str  # YYYY-MM-DD
     scheduled_start: Optional[str] = None  # HH:MM, if user picked a specific time
     scheduled_end: Optional[str] = None    # HH:MM, computed from start + duration if not provided
+
+
+# ============================================
+# Project Models
+# ============================================
+# Large, multi-session work tracked by total work hours. The AI schedules
+# realistic daily chunks against active projects; progress is hours-based.
+
+class ProjectSubtaskCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    estimated_hours: Optional[float] = Field(default=None, ge=0, le=10000)
+
+
+class ProjectSubtaskUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    estimated_hours: Optional[float] = Field(default=None, ge=0, le=10000)
+    hours_completed: Optional[float] = Field(default=None, ge=0, le=10000)
+    status: Optional[str] = None  # pending | in_progress | completed
+    sort_order: Optional[int] = None
+
+
+class ProjectSubtaskResponse(BaseModel):
+    id: str
+    project_id: str
+    user_id: str
+    name: str
+    estimated_hours: Optional[float] = None
+    hours_completed: float = 0
+    status: str = "pending"
+    sort_order: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ProjectBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    total_hours: float = Field(..., gt=0, le=10000)
+    deadline: Optional[str] = None             # YYYY-MM-DD
+    weekly_hours_target: Optional[float] = Field(default=None, gt=0, le=168)
+    ai_size_estimate: Optional[str] = None     # XS | S | M | L | XL
+    priority: str = Field(default="medium")    # low | medium | high
+    cognitive_load: str = Field(default="deep_focus")
+
+
+class ProjectCreate(ProjectBase):
+    # Optional breakdown created alongside the project
+    subtasks: Optional[List[ProjectSubtaskCreate]] = None
+
+
+class ProjectUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    status: Optional[str] = None  # active | parked | completed | archived
+    total_hours: Optional[float] = Field(default=None, gt=0, le=10000)
+    hours_completed: Optional[float] = Field(default=None, ge=0, le=10000)
+    deadline: Optional[str] = None
+    weekly_hours_target: Optional[float] = Field(default=None, gt=0, le=168)
+    ai_size_estimate: Optional[str] = None
+    priority: Optional[str] = None
+    cognitive_load: Optional[str] = None
+
+
+class ProjectResponse(ProjectBase):
+    id: str
+    user_id: str
+    status: str = "active"
+    hours_completed: float = 0
+    subtasks: List[ProjectSubtaskResponse] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ProjectEstimateRequest(BaseModel):
+    """Ask the AI to estimate total work hours from a project name/description."""
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+
+
+class ProjectEstimateResponse(BaseModel):
+    hours: float
+    size: str  # XS | S | M | L | XL
+
+
+class ProjectLogHoursRequest(BaseModel):
+    """Manually add hours of completed work to a project (edge cases)."""
+    hours: float = Field(..., gt=0, le=10000)

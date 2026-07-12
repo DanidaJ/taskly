@@ -11,6 +11,7 @@ import {
   X,
   Check,
   AlertTriangle,
+  FolderKanban,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useBacklogStore } from '@/stores';
@@ -18,6 +19,7 @@ import { Button, Input, Textarea, Modal, DatePicker, TimePicker } from '@/compon
 import { PriorityBadge } from '@/components/ui/Badge';
 import { clsx } from 'clsx';
 import type { BacklogItem } from '@/services/api';
+import ProjectsPanel from '@/components/projects/ProjectsPanel';
 
 const DURATION_PRESETS = [
   { label: '15m', value: 15 },
@@ -46,6 +48,7 @@ function formatDuration(minutes: number): string {
 export default function Backlog() {
   const { items, isLoading, hasLoaded, loadItems, addItem, updateItem, removeItem, scheduleItem } = useBacklogStore();
 
+  const [tab, setTab] = useState<'tasks' | 'projects'>('tasks');
   const [editing, setEditing] = useState<BacklogItem | null>(null);
   const [scheduling, setScheduling] = useState<BacklogItem | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<BacklogItem | null>(null);
@@ -107,14 +110,47 @@ export default function Backlog() {
             Backlog
           </h1>
           <p className="text-sm text-gray-600 mt-1">
-            Things to do "eventually" — schedule them when you find time.
+            {tab === 'tasks'
+              ? 'Things to do "eventually" — schedule them when you find time.'
+              : 'Large, multi-session work the AI breaks into realistic daily chunks.'}
           </p>
         </div>
-        <div className="text-sm text-gray-500">
-          {items.length} {items.length === 1 ? 'item' : 'items'}
-        </div>
+        {tab === 'tasks' && (
+          <div className="text-sm text-gray-500">
+            {items.length} {items.length === 1 ? 'item' : 'items'}
+          </div>
+        )}
       </div>
 
+      {/* Tabs */}
+      <div className="flex gap-1 p-1 bg-gray-100 rounded-lg w-fit">
+        <button
+          type="button"
+          onClick={() => setTab('tasks')}
+          className={clsx(
+            'inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors',
+            tab === 'tasks' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+          )}
+        >
+          <Inbox className="w-4 h-4" />
+          Tasks
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab('projects')}
+          className={clsx(
+            'inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors',
+            tab === 'projects' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+          )}
+        >
+          <FolderKanban className="w-4 h-4" />
+          Projects
+        </button>
+      </div>
+
+      {tab === 'projects' && <ProjectsPanel />}
+
+      {tab === 'tasks' && (
       <div className="grid lg:grid-cols-3 gap-6">
         {/* Add form */}
         <div className="lg:col-span-1 lg:sticky lg:top-4 lg:self-start">
@@ -287,6 +323,7 @@ export default function Backlog() {
           )}
         </div>
       </div>
+      )}
 
       {/* Edit modal */}
       {editing && (

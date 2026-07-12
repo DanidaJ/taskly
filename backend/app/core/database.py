@@ -339,6 +339,70 @@ class SupabaseDB:
         response = self.client.table('backlog_items').delete().eq('id', item_id).execute()
         return response.data
 
+    # ============================================
+    # Projects
+    # ============================================
+
+    async def get_projects(self, user_id: str):
+        """List a user's projects (newest first) with subtasks attached."""
+        response = self.client.table('projects').select('*').eq('user_id', user_id).order('created_at', desc=True).execute()
+        projects = response.data or []
+        for project in projects:
+            subs = self.client.table('project_subtasks').select('*').eq('project_id', project['id']).order('sort_order').execute()
+            project['subtasks'] = subs.data or []
+        return projects
+
+    async def get_project(self, project_id: str):
+        """Fetch a single project with its subtasks attached."""
+        response = self.client.table('projects').select('*').eq('id', project_id).execute()
+        if not response.data:
+            return None
+        project = response.data[0]
+        subs = self.client.table('project_subtasks').select('*').eq('project_id', project_id).order('sort_order').execute()
+        project['subtasks'] = subs.data or []
+        return project
+
+    async def create_project(self, project_data: dict):
+        response = self.client.table('projects').insert(project_data).execute()
+        return response.data[0] if response.data else None
+
+    async def update_project(self, project_id: str, updates: dict):
+        updates['updated_at'] = 'now()'
+        response = self.client.table('projects').update(updates).eq('id', project_id).execute()
+        return response.data[0] if response.data else None
+
+    async def delete_project(self, project_id: str):
+        # Subtasks are removed via ON DELETE CASCADE
+        response = self.client.table('projects').delete().eq('id', project_id).execute()
+        return response.data
+
+    async def log_project_hours(self, project_id: str, hours: float):
+        """Add completed work hours to a project (read-modify-write)."""
+        project = await self.get_project(project_id)
+        if not project:
+            return None
+        new_total = float(project.get('hours_completed') or 0) + float(hours)
+        return await self.update_project(project_id, {'hours_completed': new_total})
+
+    # Project Subtasks
+
+    async def get_project_subtask(self, subtask_id: str):
+        response = self.client.table('project_subtasks').select('*').eq('id', subtask_id).execute()
+        return response.data[0] if response.data else None
+
+    async def create_project_subtask(self, subtask_data: dict):
+        response = self.client.table('project_subtasks').insert(subtask_data).execute()
+        return response.data[0] if response.data else None
+
+    async def update_project_subtask(self, subtask_id: str, updates: dict):
+        updates['updated_at'] = 'now()'
+        response = self.client.table('project_subtasks').update(updates).eq('id', subtask_id).execute()
+        return response.data[0] if response.data else None
+
+    async def delete_project_subtask(self, subtask_id: str):
+        response = self.client.table('project_subtasks').delete().eq('id', subtask_id).execute()
+        return response.data
+
     # ------------------------------------------------------------------
     # Notifications
     # ------------------------------------------------------------------

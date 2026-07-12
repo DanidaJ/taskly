@@ -8,3 +8,4 @@ export { useTimerPromptStore } from './timerPromptStore';
 export type { TimerCompletionPromptInfo } from './timerPromptStore';
 export type { LearnedPattern } from './userPatternsStore';
 export { useBacklogStore } from './backlogStore';
+export { useProjectStore } from './projectStore';

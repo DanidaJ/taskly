@@ -94,6 +94,18 @@ from .schemas import (
     BacklogItemUpdate,
     BacklogItemResponse,
     BacklogScheduleRequest,
+
+    # Project models
+    ProjectBase,
+    ProjectCreate,
+    ProjectUpdate,
+    ProjectResponse,
+    ProjectSubtaskCreate,
+    ProjectSubtaskUpdate,
+    ProjectSubtaskResponse,
+    ProjectEstimateRequest,
+    ProjectEstimateResponse,
+    ProjectLogHoursRequest,
 )
 
 __all__ = [
@@ -163,4 +175,14 @@ __all__ = [
     "BacklogItemUpdate",
     "BacklogItemResponse",
     "BacklogScheduleRequest",
+    "ProjectBase",
+    "ProjectCreate",
+    "ProjectUpdate",
+    "ProjectResponse",
+    "ProjectSubtaskCreate",
+    "ProjectSubtaskUpdate",
+    "ProjectSubtaskResponse",
+    "ProjectEstimateRequest",
+    "ProjectEstimateResponse",
+    "ProjectLogHoursRequest",
 ]

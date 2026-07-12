@@ -640,4 +640,124 @@ export const backlogService = {
   },
 };
 
+// ============================================
+// Project Service (multi-session work)
+// ============================================
+
+export type ProjectStatus = 'active' | 'parked' | 'completed' | 'archived';
+export type ProjectSize = 'XS' | 'S' | 'M' | 'L' | 'XL';
+export type ProjectSubtaskStatus = 'pending' | 'in_progress' | 'completed';
+
+export interface ProjectSubtask {
+  id: string;
+  project_id: string;
+  user_id: string;
+  name: string;
+  estimated_hours?: number | null;
+  hours_completed: number;
+  status: ProjectSubtaskStatus;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Project {
+  id: string;
+  user_id: string;
+  name: string;
+  description?: string | null;
+  status: ProjectStatus;
+  total_hours: number;
+  hours_completed: number;
+  deadline?: string | null;            // YYYY-MM-DD
+  weekly_hours_target?: number | null;
+  ai_size_estimate?: ProjectSize | null;
+  priority: 'low' | 'medium' | 'high';
+  cognitive_load: string;
+  subtasks: ProjectSubtask[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectSubtaskInput {
+  name: string;
+  estimated_hours?: number;
+}
+
+export interface ProjectCreateInput {
+  name: string;
+  total_hours: number;
+  description?: string;
+  deadline?: string;
+  weekly_hours_target?: number;
+  ai_size_estimate?: ProjectSize;
+  priority?: 'low' | 'medium' | 'high';
+  cognitive_load?: string;
+  subtasks?: ProjectSubtaskInput[];
+}
+
+export interface ProjectEstimate {
+  hours: number;
+  size: ProjectSize;
+}
+
+export const projectService = {
+  async list(): Promise<Project[]> {
+    const response = await api.get('/projects');
+    return response.data;
+  },
+
+  async create(input: ProjectCreateInput): Promise<Project> {
+    const response = await api.post('/projects', input);
+    return response.data;
+  },
+
+  async update(id: string, updates: Partial<Project>): Promise<Project> {
+    const response = await api.patch(`/projects/${id}`, updates);
+    return response.data;
+  },
+
+  async remove(id: string): Promise<void> {
+    await api.delete(`/projects/${id}`);
+  },
+
+  async estimateHours(name: string, description?: string): Promise<ProjectEstimate> {
+    const response = await api.post('/projects/estimate-hours', { name, description });
+    return response.data;
+  },
+
+  async park(id: string): Promise<Project> {
+    const response = await api.post(`/projects/${id}/park`);
+    return response.data;
+  },
+
+  async complete(id: string): Promise<Project> {
+    const response = await api.post(`/projects/${id}/complete`);
+    return response.data;
+  },
+
+  async logHours(id: string, hours: number): Promise<Project> {
+    const response = await api.post(`/projects/${id}/log-hours`, { hours });
+    return response.data;
+  },
+
+  async addSubtask(projectId: string, subtask: ProjectSubtaskInput): Promise<ProjectSubtask> {
+    const response = await api.post(`/projects/${projectId}/subtasks`, subtask);
+    return response.data;
+  },
+
+  async updateSubtask(
+    projectId: string,
+    subtaskId: string,
+    updates: Partial<ProjectSubtask>
+  ): Promise<ProjectSubtask> {
+    const response = await api.patch(`/projects/${projectId}/subtasks/${subtaskId}`, updates);
+    return response.data;
+  },
+
+  async removeSubtask(projectId: string, subtaskId: string): Promise<void> {
+    await api.delete(`/projects/${projectId}/subtasks/${subtaskId}`);
+  },
+};
+
 export default api;

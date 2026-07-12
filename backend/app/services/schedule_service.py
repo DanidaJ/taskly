@@ -82,20 +82,42 @@ class ScheduleService:
         base_date: str
     ) -> datetime:
         """
-        Calculate the actual datetime when wind-down should start.
-        For cross-midnight schedules, this will be in the next calendar day.
+        Latest datetime the AI may schedule a task to end.
+
+        Whichever is earlier wins between:
+          - sleep_time − wind_down_minutes (biological cap)
+          - preferred_end_time (user-set "done by" cap)
+
+        For cross-midnight sleep schedules, the wind-down cap may land on the
+        next calendar day; preferred_end_time is always interpreted in the
+        evening of base_date (it makes no sense as "3am tomorrow"), with one
+        exception: a small-hour value (≤ wake_time) is treated as next-day so
+        night owls can still cap at e.g. 01:00.
         """
         base = datetime.strptime(base_date, '%Y-%m-%d')
         sleep_time = self.parse_time(sleep_schedule.sleep_time)
-        
+
         if self.is_cross_midnight_schedule(sleep_schedule):
-            # Sleep time is after midnight, so add a day
             sleep_datetime = datetime.combine(base.date() + timedelta(days=1), sleep_time)
         else:
             sleep_datetime = datetime.combine(base.date(), sleep_time)
-        
-        # Subtract wind-down time
+
         wind_down_datetime = sleep_datetime - timedelta(minutes=sleep_schedule.wind_down_minutes)
+
+        preferred = getattr(sleep_schedule, "preferred_end_time", None)
+        if preferred:
+            try:
+                pref_time = self.parse_time(preferred)
+                wake_time = self.parse_time(sleep_schedule.wake_time)
+                # Small-hour preferred end (e.g. 01:00) for a night owl → next day.
+                if pref_time <= wake_time and self.is_cross_midnight_schedule(sleep_schedule):
+                    pref_dt = datetime.combine(base.date() + timedelta(days=1), pref_time)
+                else:
+                    pref_dt = datetime.combine(base.date(), pref_time)
+                return min(wind_down_datetime, pref_dt)
+            except (ValueError, AttributeError):
+                logger.warning("Invalid preferred_end_time, ignoring", value=preferred)
+
         return wind_down_datetime
     
     def get_available_time_slots(

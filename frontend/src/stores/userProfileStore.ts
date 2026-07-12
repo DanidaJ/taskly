@@ -46,6 +46,7 @@ const defaultSleepSchedule: Omit<SleepSchedule, 'id' | 'user_id' | 'updated_at'>
   wake_time: '07:00',
   sleep_time: '23:00',
   wind_down_minutes: 30,
+  preferred_end_time: null,
 };
 
 const defaultPreferences: Omit<UserPreferences, 'id' | 'user_id' | 'updated_at'> = {

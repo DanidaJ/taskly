@@ -62,6 +62,34 @@ CRITICAL RULES:
 Always respond with valid JSON in the requested format."""
 
 
+def _size_from_hours(hours: float) -> str:
+    """Map a total-hours estimate to a t-shirt size bucket."""
+    if hours < 5:
+        return "XS"
+    if hours < 15:
+        return "S"
+    if hours < 40:
+        return "M"
+    if hours < 100:
+        return "L"
+    return "XL"
+
+
+def _heuristic_project_hours(name: str, description: Optional[str] = None) -> float:
+    """Keyword-based hours guess used when the AI is unavailable. Gives a rough
+    anchor the user can correct rather than forcing a blank field."""
+    text = f"{name} {description or ''}".lower()
+    if any(k in text for k in ["app", "website", "platform", "system", "course",
+                                "book", "thesis", "dissertation", "game"]):
+        return 40.0
+    if any(k in text for k in ["build", "develop", "design", "create", "write",
+                                "research", "redesign", "migrate"]):
+        return 20.0
+    if any(k in text for k in ["fix", "update", "review", "read", "clean", "small"]):
+        return 8.0
+    return 15.0
+
+
 def _convert_existing_tasks(raw_tasks: list) -> list:
     """Convert raw task dicts/objects from existing_plans into PlannedTask objects
     that the schedule service can use to block time slots."""
@@ -247,7 +275,42 @@ def build_user_prompt(request: AIPlanRequest) -> str:
         ])
     else:
         backlog_str = "  (Backlog is empty)"
-    
+
+    # Format active projects so the AI can advance them by a realistic daily
+    # chunk. Names must be used EXACTLY so completed work logs back to the right
+    # project/subtask (the frontend matches by name).
+    projects = context.projects or []
+    active_projects = [p for p in projects if str(p.get("status", "active")) == "active"]
+    if active_projects:
+        proj_lines = []
+        for p in active_projects:
+            total = float(p.get("total_hours") or 0)
+            done = float(p.get("hours_completed") or 0)
+            remaining = max(0.0, total - done)
+            pace = ""
+            deadline = p.get("deadline")
+            if deadline:
+                try:
+                    d = datetime.strptime(deadline, "%Y-%m-%d")
+                    days_left = max(1, (d.date() - now.date()).days)
+                    per_day = remaining / days_left
+                    pace = f", deadline {deadline} (~{per_day:.1f}h/day to finish on time)"
+                except ValueError:
+                    pace = f", deadline {deadline}"
+            elif p.get("weekly_hours_target"):
+                pace = f", target {p.get('weekly_hours_target')}h/week"
+            open_subs = [s for s in (p.get("subtasks") or []) if str(s.get("status")) != "completed"]
+            if open_subs:
+                sub_str = f' → next subtask (name the task EXACTLY this): "{open_subs[0].get("name")}"'
+            else:
+                sub_str = f' → name the task EXACTLY: "{p.get("name")}"'
+            proj_lines.append(
+                f"  🗂️ {p.get('name')} — {remaining:.1f}h remaining{pace}{sub_str}"
+            )
+        projects_str = "\n".join(proj_lines)
+    else:
+        projects_str = "  (No active projects)"
+
     # Calculate available time slots (also considering existing tasks)
     # Convert existing tasks to PlannedTask objects for slot calculation
     existing_planned_tasks = _convert_existing_tasks(existing_task_objects)
@@ -315,23 +378,46 @@ def build_user_prompt(request: AIPlanRequest) -> str:
         for slot in available_slots
     ]) if available_slots else "  ⚠️ No available time slots!"
     
-    # Get preference value (handle both enum and string)
-    energy_pref = context.energy_profile.preference
-    if hasattr(energy_pref, 'value'):
-        energy_pref = energy_pref.value
-    
     # Detect if this is a night owl schedule
     is_night_owl = schedule_service.is_cross_midnight_schedule(context.sleep_schedule)
     sleep_deadline = schedule_service.calculate_sleep_deadline(context.sleep_schedule, request.target_date)
     
-    # Current time context
+    # Current time + scheduling window context. Always tell the AI the current
+    # clock time and the latest end-of-window — this is the single biggest
+    # signal preventing it from scheduling shallow tasks at 23:00 just because
+    # a slot exists.
     is_today = request.target_date == now.strftime('%Y-%m-%d')
-    time_context = f"⏰ Current time: {now.strftime('%H:%M')} - Schedule tasks after this time" if is_today else ""
-    
+    end_of_window = sleep_deadline.strftime('%H:%M')
+    preferred_end = getattr(context.sleep_schedule, "preferred_end_time", None)
+
+    if is_today:
+        hours_remaining = max(0.0, (sleep_deadline - now).total_seconds() / 3600)
+        time_context = (
+            f"⏰ **CURRENT TIME: {now.strftime('%H:%M')} ({now.strftime('%A')})**\n"
+            f"   You are planning for the REMAINDER of today: roughly {hours_remaining:.1f}h "
+            f"between now and the end-of-window at {end_of_window}.\n"
+            f"   Do NOT schedule anything before {now.strftime('%H:%M')}."
+        )
+    else:
+        time_context = f"📆 Planning a future date. Full day available from wake to end-of-window."
+
+    if preferred_end:
+        end_window_note = (
+            f"🛑 **HARD STOP: {end_of_window}** "
+            f"(user's preferred end time — do NOT schedule any task to end after this, "
+            f"even though they may stay up later)."
+        )
+    else:
+        end_window_note = (
+            f"🛑 **HARD STOP: {end_of_window}** "
+            f"(sleep wind-down begins — no task may end after this)."
+        )
+
     # Build smart schedule awareness
     schedule_awareness = f"""
 📅 **{day_names[day_of_week]}, {request.target_date}**
 {time_context}
+{end_window_note}
 
 **Already Scheduled Tasks (DO NOT recreate these, they are already on the calendar):**
 {existing_tasks_str}
@@ -340,6 +426,15 @@ def build_user_prompt(request: AIPlanRequest) -> str:
 {backlog_str}
    → When the user asks you to plan "from backlog", pick items from THIS list and
      schedule them. Use each item's EXACT name. Do not invent new task names.
+
+**🗂️ Active Projects (large multi-session work — advance with a REALISTIC daily chunk, NEVER the whole project):**
+{projects_str}
+   → For each project you advance today, schedule ONE sensible block (default
+     1–2.5 hours; never more than comfortably fits the day around other tasks).
+   → Use the EXACT name shown (the next subtask if listed, otherwise the project
+     name) so completed time is logged to the right project.
+   → Honor deadline pacing: a project needing ~Nh/day should be prioritized so it
+     finishes on time. Projects without a deadline only fill leftover time.
 
 **Your Blocked Time (Commitments):**
 {commitments_str}
@@ -350,12 +445,11 @@ def build_user_prompt(request: AIPlanRequest) -> str:
 **Total Available: {total_available_hours:.1f} hours**
 
 **Your Profile:**
-- Energy type: {energy_pref} person
-- Peak focus hours: {context.energy_profile.peak_focus_start} - {context.energy_profile.peak_focus_end}
+- Peak focus hours (place deep work here): {context.energy_profile.peak_focus_start} - {context.energy_profile.peak_focus_end}
 - Wake time: {context.sleep_schedule.wake_time}
-- Wind-down starts: {sleep_deadline.strftime('%H:%M')}
+- Latest task end allowed: {end_of_window}
 - Target sleep time: {context.sleep_schedule.sleep_time}
-{"- NOTE: You're a night owl! Tasks can be scheduled past midnight until wind-down time." if is_night_owl else ""}
+{f"- Sleep crosses midnight — peak focus may be late evening. NEVER schedule past {end_of_window}." if is_night_owl else ""}
 """
     
     from app.services.task_history_service import task_history_service
@@ -411,6 +505,12 @@ def build_user_prompt(request: AIPlanRequest) -> str:
 5. **SMART NOTES**:
    In the "notes" field, include the SPECIFIC time slot where the task should go.
    Example: "Schedule at 19:00-20:00 after work ends"
+
+6. **PROJECTS = DAILY CHUNKS**:
+   Active projects are large and span many days. NEVER schedule a whole project in
+   one day. Pick a realistic block (1–2.5h) that fits around the day's other tasks.
+   Use the EXACT project/subtask name shown so progress is tracked. The block's
+   suggested_duration IS the hours that will be logged toward the project.
 
 **OUTPUT FORMAT (JSON only):**
 {{
@@ -804,6 +904,41 @@ Respond with JSON:
                 flexibility=TaskFlexibility.FLEXIBLE,
             )
     
+    async def estimate_project_hours(self, name: str, description: Optional[str] = None) -> dict:
+        """Estimate total work hours for a multi-session project from its name.
+
+        Returns {"hours": float, "size": str}. The estimate is an anchor for the
+        user to correct, not a commitment. Falls back to a keyword heuristic when
+        the AI is unavailable or returns something unusable.
+        """
+        desc_line = f"\nDescription: {description}" if description else ""
+        prompt = f"""Estimate the TOTAL hands-on work hours to fully complete this multi-session project.
+
+Project: "{name}"{desc_line}
+
+Think about a typical individual doing focused work across several sessions.
+Respond with JSON ONLY in this exact shape:
+{{
+  "hours": <number, total estimated work hours>,
+  "size": "XS|S|M|L|XL"
+}}
+
+Size guide: XS (<5h), S (5-15h), M (15-40h), L (40-100h), XL (100h+)."""
+
+        try:
+            response_text = await self._call_agent(prompt)
+            data = self._parse_json_response(response_text)
+            raw_hours = data.get("hours")
+            hours = float(raw_hours)
+            if hours <= 0 or hours > 10000:
+                raise ValueError("hours out of range")
+        except Exception as e:
+            logger.warning("Project hours estimate falling back to heuristic", error=str(e))
+            hours = _heuristic_project_hours(name, description)
+
+        hours = round(hours, 1)
+        return {"hours": hours, "size": _size_from_hours(hours)}
+
     def _generate_fallback_plan(self, raw_input: str) -> AIPlanResponse:
         """Generate a fallback plan when AI is unavailable"""
         # Parse tasks from raw input (simple line-by-line parsing)

@@ -18,9 +18,12 @@ import {
   Sunrise,
   BookOpen,
   Dumbbell,
+  Utensils,
+  Coffee,
+  Heart,
 } from 'lucide-react';
 import { useUserProfileStore, useAuthStore } from '@/stores';
-import { Commitment, EnergyPreference, CognitiveLoad, RecurringTask, RecurrenceType, RoutineTemplate, PresetTemplate } from '@/types';
+import { Commitment, CommitmentType, ROUTINE_TYPES, EnergyPreference, CognitiveLoad, RecurringTask, RecurrenceType, RoutineTemplate, PresetTemplate } from '@/types';
 import { Button, Input, Modal } from '@/components/ui';
 import { commitmentService, profileService, recurringTaskService, routineTemplateService, notificationService as pushNotificationService, NotificationPreferences } from '@/services/api';
 import { requestNotificationPermission, ensureFcmTokenRegistered, unregisterFcmToken, getNotificationPermission, isPushSupported } from '@/services/firebase';
@@ -54,6 +57,7 @@ export default function Settings() {
   const [wakeTime, setWakeTime] = useState(sleepSchedule?.wake_time || '07:00');
   const [sleepTime, setSleepTime] = useState(sleepSchedule?.sleep_time || '23:00');
   const [windDownMinutes, setWindDownMinutes] = useState(sleepSchedule?.wind_down_minutes || 30);
+  const [preferredEndTime, setPreferredEndTime] = useState(sleepSchedule?.preferred_end_time || '');
   const [energyPreference, setEnergyPreference] = useState<EnergyPreference>(
     energyProfile?.preference || 'morning'
   );
@@ -283,6 +287,7 @@ export default function Settings() {
         wake_time: wakeTime,
         sleep_time: sleepTime,
         wind_down_minutes: windDownMinutes,
+        preferred_end_time: preferredEndTime || null,
       };
       
       // Save to backend
@@ -330,6 +335,47 @@ export default function Settings() {
     } catch (error) {
       console.error('Failed to add commitment:', error);
       toast.error('Failed to add commitment');
+    }
+  };
+
+  // One-click quick-adds for daily routines. Same data model as commitments,
+  // just pre-filled so users don't have to think about times for the obvious cases.
+  const ROUTINE_PRESETS: Array<{
+    key: string;
+    name: string;
+    type: CommitmentType;
+    start_time: string;
+    end_time: string;
+    icon: React.ReactNode;
+  }> = [
+    { key: 'lunch', name: 'Lunch', type: 'meal', start_time: '12:30', end_time: '13:15',
+      icon: <Utensils className="w-4 h-4 text-orange-500" /> },
+    { key: 'dinner', name: 'Dinner', type: 'meal', start_time: '19:00', end_time: '19:45',
+      icon: <Utensils className="w-4 h-4 text-orange-500" /> },
+    { key: 'exercise', name: 'Exercise', type: 'exercise', start_time: '07:00', end_time: '07:45',
+      icon: <Dumbbell className="w-4 h-4 text-green-600" /> },
+    { key: 'winddown', name: 'Wind-down', type: 'wind_down', start_time: '22:00', end_time: '22:30',
+      icon: <Moon className="w-4 h-4 text-indigo-500" /> },
+    { key: 'breakfast', name: 'Breakfast', type: 'meal', start_time: '08:00', end_time: '08:30',
+      icon: <Coffee className="w-4 h-4 text-amber-600" /> },
+    { key: 'me-time', name: 'Personal time', type: 'personal', start_time: '20:00', end_time: '21:00',
+      icon: <Heart className="w-4 h-4 text-pink-500" /> },
+  ];
+
+  const handleAddRoutinePreset = async (preset: typeof ROUTINE_PRESETS[number]) => {
+    try {
+      const saved = await commitmentService.create({
+        name: preset.name,
+        type: preset.type,
+        start_time: preset.start_time,
+        end_time: preset.end_time,
+        days_of_week: [0, 1, 2, 3, 4, 5, 6], // every day for routines by default
+      });
+      addCommitment(saved);
+      toast.success(`${preset.name} added — the planner will skip this time`);
+    } catch (error) {
+      console.error('Failed to add routine:', error);
+      toast.error('Failed to add routine');
     }
   };
 
@@ -646,6 +692,33 @@ export default function Settings() {
               </div>
             </div>
 
+            {/* Preferred End Time (hard cap for AI scheduler) */}
+            <div>
+              <label className="label">Done-by Time (optional)</label>
+              <p className="text-sm text-gray-600 mb-3">
+                Latest time the AI may schedule a task to end. Useful if you stay up late
+                but don't want work scheduled after a certain hour. Leave empty to use
+                sleep − wind-down.
+              </p>
+              <div className="flex items-center gap-3">
+                <Input
+                  type="time"
+                  value={preferredEndTime}
+                  onChange={(e) => setPreferredEndTime(e.target.value)}
+                  leftIcon={<Clock className="w-4 h-4" />}
+                  className="max-w-xs"
+                />
+                {preferredEndTime && (
+                  <button
+                    onClick={() => setPreferredEndTime('')}
+                    className="text-sm text-gray-500 hover:text-gray-700 underline"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+
             <Button variant="primary" onClick={handleSaveSleep}>
               <Save className="w-4 h-4 mr-2" />
               Save Sleep Schedule
@@ -654,57 +727,116 @@ export default function Settings() {
         )}
 
         {/* Commitments Tab */}
-        {activeTab === 'commitments' && (
-          <div className="space-y-4">
-            <div className="glass-card">
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h2 className="text-lg font-semibold text-gray-900">Fixed Commitments</h2>
-                  <p className="text-sm text-gray-600">
-                    Work, school, or other recurring obligations
-                  </p>
+        {activeTab === 'commitments' && (() => {
+          const isRoutine = (c: Commitment) => ROUTINE_TYPES.includes(c.type);
+          const fixedCommitments = commitments.filter((c) => !isRoutine(c));
+          const routineCommitments = commitments.filter(isRoutine);
+          const existingRoutineKeys = new Set(
+            routineCommitments.map((r) => r.name.toLowerCase())
+          );
+
+          const renderItem = (c: Commitment) => (
+            <div
+              key={c.id}
+              className="flex items-center justify-between p-4 rounded-apple bg-gray-50"
+            >
+              <div>
+                <p className="font-medium text-gray-900">{c.name}</p>
+                <p className="text-sm text-gray-600">
+                  {c.start_time} - {c.end_time} •{' '}
+                  {c.days_of_week.length === 7
+                    ? 'Every day'
+                    : c.days_of_week.map((d) => dayLabels[d]).join(', ')}
+                </p>
+              </div>
+              <button
+                onClick={() => c.id && handleDeleteCommitment(c.id)}
+                className="p-2 rounded-apple text-gray-500 hover:text-red-600 hover:bg-gray-200"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
+          );
+
+          return (
+            <div className="space-y-4">
+              {/* Fixed Commitments */}
+              <div className="glass-card">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h2 className="text-lg font-semibold text-gray-900">Fixed Commitments</h2>
+                    <p className="text-sm text-gray-600">
+                      Work, school, meetings — time the planner must skip
+                    </p>
+                  </div>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    leftIcon={<Plus className="w-4 h-4" />}
+                    onClick={() => setIsCommitmentModalOpen(true)}
+                  >
+                    Add
+                  </Button>
                 </div>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  leftIcon={<Plus className="w-4 h-4" />}
-                  onClick={() => setIsCommitmentModalOpen(true)}
-                >
-                  Add
-                </Button>
+
+                {fixedCommitments.length > 0 ? (
+                  <div className="space-y-3">{fixedCommitments.map(renderItem)}</div>
+                ) : (
+                  <p className="text-center py-8 text-gray-600">
+                    No commitments added yet
+                  </p>
+                )}
               </div>
 
-              {commitments.length > 0 ? (
-                <div className="space-y-3">
-                  {commitments.map((commitment) => (
-                    <div
-                      key={commitment.id}
-                      className="flex items-center justify-between p-4 rounded-apple bg-gray-50"
-                    >
-                      <div>
-                        <p className="font-medium text-gray-900">{commitment.name}</p>
-                        <p className="text-sm text-gray-600">
-                          {commitment.start_time} - {commitment.end_time} •{' '}
-                          {commitment.days_of_week.map((d) => dayLabels[d]).join(', ')}
-                        </p>
-                      </div>
-                      <button
-                        onClick={() => commitment.id && handleDeleteCommitment(commitment.id)}
-                        className="p-2 rounded-apple text-gray-500 hover:text-red-600 hover:bg-gray-200"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ))}
+              {/* Daily Routines */}
+              <div className="glass-card">
+                <div className="mb-4">
+                  <h2 className="text-lg font-semibold text-gray-900">Daily Routines</h2>
+                  <p className="text-sm text-gray-600">
+                    Block personal time so the AI doesn't schedule over meals, exercise, or wind-down.
+                    One-click adds — adjust times after.
+                  </p>
                 </div>
-              ) : (
-                <p className="text-center py-8 text-gray-600">
-                  No commitments added yet
-                </p>
-              )}
+
+                {/* Quick-add presets */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-4">
+                  {ROUTINE_PRESETS.map((preset) => {
+                    const alreadyAdded = existingRoutineKeys.has(preset.name.toLowerCase());
+                    return (
+                      <button
+                        key={preset.key}
+                        onClick={() => !alreadyAdded && handleAddRoutinePreset(preset)}
+                        disabled={alreadyAdded}
+                        className={clsx(
+                          'flex items-center gap-2 px-3 py-2 rounded-apple border text-sm transition-all',
+                          alreadyAdded
+                            ? 'border-gray-200 bg-gray-50 text-gray-400 cursor-not-allowed'
+                            : 'border-gray-300 bg-white text-gray-700 hover:border-blue-400 hover:bg-blue-50/40'
+                        )}
+                      >
+                        {preset.icon}
+                        <span className="flex-1 text-left truncate">{preset.name}</span>
+                        {alreadyAdded ? (
+                          <span className="text-xs text-gray-400">added</span>
+                        ) : (
+                          <Plus className="w-3.5 h-3.5 text-gray-400" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {routineCommitments.length > 0 ? (
+                  <div className="space-y-3">{routineCommitments.map(renderItem)}</div>
+                ) : (
+                  <p className="text-center py-6 text-gray-500 text-sm">
+                    No routines yet — tap above to add the ones that fit your day
+                  </p>
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Routines Tab */}
         {activeTab === 'routines' && (

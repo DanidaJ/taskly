@@ -16,7 +16,7 @@ import {
   Zap,
   Brain,
 } from 'lucide-react';
-import { useTaskStore, useUserProfileStore, useUserPatternsStore, useBacklogStore } from '@/stores';
+import { useTaskStore, useUserProfileStore, useUserPatternsStore, useBacklogStore, useProjectStore } from '@/stores';
 import { aiService } from '@/services';
 import { focusSessionService, sleepEntryService } from '@/services/api';
 import { AIPlanResponse, UserContext } from '@/types';
@@ -62,11 +62,17 @@ export default function PlannerChat() {
     loadItems: loadBacklogItems,
     removeItem: removeBacklogItem,
   } = useBacklogStore();
+  const { projects, loadProjects } = useProjectStore();
 
   // Load backlog so the AI can schedule directly from it.
   useEffect(() => {
     loadBacklogItems();
   }, [loadBacklogItems]);
+
+  // Load projects so the AI can advance them in realistic daily chunks.
+  useEffect(() => {
+    loadProjects();
+  }, [loadProjects]);
 
   // Detect target date from user input
   const detectTargetDate = (input: string): string => {
@@ -205,6 +211,7 @@ export default function PlannerChat() {
         wake_time: '07:00',
         sleep_time: '23:00',
         wind_down_minutes: 30,
+        preferred_end_time: null,
       },
       preferences: preferences || {
         manual_scheduling_allowed: true,
@@ -223,6 +230,18 @@ export default function PlannerChat() {
         priority: b.priority,
         notes: b.notes,
       })),
+      projects: (projects || [])
+        .filter((p) => p.status === 'active')
+        .map((p) => ({
+          name: p.name,
+          total_hours: p.total_hours,
+          hours_completed: p.hours_completed,
+          deadline: p.deadline,
+          weekly_hours_target: p.weekly_hours_target,
+          status: p.status,
+          priority: p.priority,
+          subtasks: p.subtasks.map((s) => ({ name: s.name, status: s.status })),
+        })),
     };
   };
 
