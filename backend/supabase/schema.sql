@@ -8,8 +8,8 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- ENUM TYPES
 -- ============================================
 
--- Cognitive Load Types
-CREATE TYPE cognitive_load AS ENUM ('deep_focus', 'light_logic', 'creative', 'routine', 'communication');
+-- Cognitive Load Types (single canonical vocabulary, shared with the API/frontend)
+CREATE TYPE cognitive_load AS ENUM ('deep_focus', 'light_focus', 'admin', 'physical', 'recovery');
 
 -- Priority Levels
 CREATE TYPE priority_level AS ENUM ('must_do', 'should_do', 'nice_to_have');
@@ -35,7 +35,7 @@ CREATE TABLE tasks (
     name VARCHAR(255) NOT NULL,
     description TEXT,
     estimated_minutes INTEGER NOT NULL DEFAULT 30,
-    cognitive_load cognitive_load DEFAULT 'routine',
+    cognitive_load cognitive_load DEFAULT 'light_focus',
     priority priority_level DEFAULT 'should_do',
     flexibility task_flexibility DEFAULT 'flexible',
     deadline TIMESTAMP WITH TIME ZONE,
@@ -67,7 +67,7 @@ CREATE TABLE planned_tasks (
     scheduled_start TIME,
     scheduled_end TIME,
     estimated_minutes INTEGER NOT NULL DEFAULT 30,
-    cognitive_load cognitive_load DEFAULT 'routine',
+    cognitive_load cognitive_load DEFAULT 'light_focus',
     priority priority_level DEFAULT 'should_do',
     flexibility task_flexibility DEFAULT 'flexible',
     status task_status DEFAULT 'not_started',

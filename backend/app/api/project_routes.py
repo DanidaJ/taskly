@@ -11,7 +11,7 @@ from typing import List
 from datetime import datetime
 import uuid
 
-from app.core.security import get_current_user
+from app.core.security import validate_supabase_token
 from app.core.database import db
 from app.services.ai_service import ai_service
 from app.models import (
@@ -52,7 +52,7 @@ async def _owned_project(project_id: str, user_id: str) -> dict:
 @router.post("/estimate-hours", response_model=ProjectEstimateResponse)
 async def estimate_project_hours(
     request: ProjectEstimateRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Return an AI hours estimate + size bucket for a project name/description.
     Used to pre-fill the create form so the user reacts to a number instead of
@@ -66,7 +66,7 @@ async def estimate_project_hours(
 # ---------------------------------------------------------------------------
 
 @router.get("", response_model=List[ProjectResponse])
-async def list_projects(current_user: dict = Depends(get_current_user)):
+async def list_projects(current_user: dict = Depends(validate_supabase_token)):
     """Return all projects for the current user, newest first, with subtasks."""
     user_id = current_user["user_id"]
     projects = await db.get_projects(user_id)
@@ -76,7 +76,7 @@ async def list_projects(current_user: dict = Depends(get_current_user)):
 @router.post("", response_model=ProjectResponse, status_code=201)
 async def create_project(
     project: ProjectCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Create a project and, optionally, its subtasks in one call."""
     user_id = current_user["user_id"]
@@ -105,7 +105,7 @@ async def create_project(
 async def update_project(
     project_id: str,
     updates: ProjectUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Update any project field (name, hours, deadline, status, etc.)."""
     user_id = current_user["user_id"]
@@ -127,7 +127,7 @@ async def update_project(
 @router.delete("/{project_id}", status_code=204)
 async def delete_project(
     project_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Permanently delete a project (subtasks cascade)."""
     user_id = current_user["user_id"]
@@ -138,7 +138,7 @@ async def delete_project(
 @router.post("/{project_id}/park", response_model=ProjectResponse)
 async def toggle_park_project(
     project_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Toggle a project between active and parked. Parked projects are skipped
     by the AI scheduler but not abandoned."""
@@ -152,7 +152,7 @@ async def toggle_park_project(
 @router.post("/{project_id}/complete", response_model=ProjectResponse)
 async def complete_project(
     project_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Mark a project complete."""
     user_id = current_user["user_id"]
@@ -165,7 +165,7 @@ async def complete_project(
 async def log_project_hours(
     project_id: str,
     request: ProjectLogHoursRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Manually add completed hours to a project (edge cases — normally hours are
     logged automatically when a project-linked task is completed)."""
@@ -182,7 +182,7 @@ async def log_project_hours(
 @router.get("/{project_id}/subtasks", response_model=List[ProjectSubtaskResponse])
 async def list_subtasks(
     project_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     user_id = current_user["user_id"]
     project = await _owned_project(project_id, user_id)
@@ -193,7 +193,7 @@ async def list_subtasks(
 async def add_subtask(
     project_id: str,
     subtask: ProjectSubtaskCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     user_id = current_user["user_id"]
     project = await _owned_project(project_id, user_id)
@@ -214,7 +214,7 @@ async def update_subtask(
     project_id: str,
     subtask_id: str,
     updates: ProjectSubtaskUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     user_id = current_user["user_id"]
     await _owned_project(project_id, user_id)
@@ -236,7 +236,7 @@ async def update_subtask(
 async def delete_subtask(
     project_id: str,
     subtask_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     user_id = current_user["user_id"]
     await _owned_project(project_id, user_id)

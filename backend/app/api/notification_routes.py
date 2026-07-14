@@ -4,7 +4,8 @@ from typing import Optional
 import pytz
 
 from app.core.config import settings
-from app.core.security import get_current_user
+from app.core.security import validate_supabase_token
+from app.core.rate_limit import limiter
 from app.core.database import db
 from app.services.notification_service import notification_service
 
@@ -73,10 +74,11 @@ async def get_web_firebase_config():
 
 # ----------------------------- Token mgmt ---------------------------------
 @router.post("/register")
+@limiter.limit("20/minute")
 async def register_fcm_token(
     payload: TokenRegistration,
     request: Request,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Register or refresh an FCM token for the current user/device."""
     if db is None:
@@ -98,28 +100,18 @@ async def register_fcm_token(
             pytz.timezone(tz_from_client)
         except Exception:
             tz_from_client = ""
-
     if tz_from_client:
-        existing_prefs = await db.get_notification_preferences(current_user["user_id"])
-        if not existing_prefs:
-            await db.save_notification_preferences({
-                "user_id": current_user["user_id"],
-                "timezone": tz_from_client,
-            })
-        elif not (existing_prefs.get("timezone") or "").strip():
-            await db.save_notification_preferences({
-                **existing_prefs,
-                "user_id": current_user["user_id"],
-                "timezone": tz_from_client,
-            })
+        await db.ensure_notification_timezone(current_user["user_id"], tz_from_client)
 
     return {"success": bool(saved), "message": "Token registered"}
 
 
 @router.post("/unregister")
+@limiter.limit("20/minute")
 async def unregister_fcm_token(
     payload: TokenUnregister,
-    current_user: dict = Depends(get_current_user),
+    request: Request,
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Remove an FCM token (e.g. on logout / disable notifications)."""
     if db is None:
@@ -131,7 +123,7 @@ async def unregister_fcm_token(
 # ----------------------------- Preferences --------------------------------
 @router.get("/preferences", response_model=NotificationPreferences)
 async def get_notification_preferences(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     if db is None:
         return NotificationPreferences()
@@ -145,7 +137,7 @@ async def get_notification_preferences(
 @router.put("/preferences", response_model=NotificationPreferences)
 async def update_notification_preferences(
     prefs: NotificationPreferences,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     if db is None:
         return prefs
@@ -158,11 +150,40 @@ async def update_notification_preferences(
     return NotificationPreferences(**{k: v for k, v in saved.items() if k in fields})
 
 
+# ----------------------------- Diagnostics --------------------------------
+@router.get("/debug/reminders")
+async def debug_reminders(
+    send: bool = False,
+    current_user: dict = Depends(validate_supabase_token),
+):
+    """Evaluate this user's task reminders right now and report exactly what the
+    scheduler would see — timezone, today's plan, each task's fire windows, and
+    whether anything is due. Read-only by default; pass ?send=true to actually
+    dispatch (subject to the same quiet-hours/dedupe rules as the real tick).
+
+    This is the manual counterpart to the every-minute background job, so you
+    can repro without waiting for a wall-clock window.
+    """
+    from app.services.notification_scheduler import _process_user_task_reminders, scheduler_status
+    from app.services.notification_service import firebase_ready
+
+    evaluation = await _process_user_task_reminders(current_user["user_id"], dry_run=not send)
+    return {
+        "firebase_ready": firebase_ready(),
+        "notifications_enabled_setting": settings.notifications_enabled,
+        "scheduler": scheduler_status(),
+        "dispatched": bool(send),
+        "evaluation": evaluation,
+    }
+
+
 # ----------------------------- Send ---------------------------------------
 @router.post("/test")
+@limiter.limit("3/minute")
 async def send_test_notification(
     payload: TestNotificationPayload,
-    current_user: dict = Depends(get_current_user),
+    request: Request,
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Send a test notification to all of the current user's devices."""
     sent = await notification_service.send_to_user(

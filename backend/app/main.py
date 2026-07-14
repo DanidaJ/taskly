@@ -8,8 +8,11 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from app.core.config import settings
+from app.core.rate_limit import limiter
 from app.api import (
     ai_router,
     task_router,
@@ -49,6 +52,13 @@ async def lifespan(app: FastAPI):
     """Application lifespan events"""
     logger.info("Starting Taskly API", version=settings.APP_VERSION)
     stop_scheduler = None
+    try:
+        from app.core.security import warm_jwks_cache
+        await warm_jwks_cache()
+        logger.info("jwks_cache_warmed")
+    except Exception as e:
+        # Non-fatal: keys are fetched lazily on first authenticated request.
+        logger.warning("jwks_warm_failed", error=str(e))
     try:
         from app.services.notification_service import initialize_firebase
         from app.services.notification_scheduler import (
@@ -90,6 +100,11 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DEBUG else None,
     lifespan=lifespan,
 )
+
+# Rate limiting (slowapi). Per-route limits are declared with @limiter.limit
+# on the endpoints; here we register the limiter and the 429 handler.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 # CORS middleware

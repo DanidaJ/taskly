@@ -109,7 +109,9 @@ export default function GlobalTimerCompletionPrompt() {
             duration: totalSeconds,
             mode: 'focus',
             completed: true,
-            session_date: format(new Date(), 'yyyy-MM-dd'),
+            // Date by session start so a cross-midnight session lands on the
+            // day it began, matching FocusTimer's own save.
+            session_date: format(startTime, 'yyyy-MM-dd'),
           }).catch((error) => {
             console.error('Failed to record focus session globally:', error);
           });

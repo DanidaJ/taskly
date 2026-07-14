@@ -2,8 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from typing import List
 from datetime import datetime
 import uuid
+import structlog
 
-from app.core.security import get_current_user
+from app.core.security import validate_supabase_token
 from app.core.database import db
 from app.models import (
     TaskCreate,
@@ -11,12 +12,14 @@ from app.models import (
     Task,
 )
 
+logger = structlog.get_logger()
+
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
 
 @router.get("", response_model=List[Task])
 async def get_tasks(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get all tasks for the current user"""
     if db is None:
@@ -36,7 +39,7 @@ async def get_tasks(
 @router.post("", response_model=Task)
 async def create_task(
     task: TaskCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Create a new task"""
     if db is None:
@@ -53,20 +56,10 @@ async def create_task(
     try:
         task_dict = task.model_dump()
         
-        # Map frontend field names to database field names and align enum values
-        cognitive_map = {
-            "light_focus": "routine",
-            "deep_focus": "deep_focus",
-            "admin": "communication",
-            "physical": "physical",
-            "recovery": "routine",
-            "light_logic": "light_logic",
-            "creative": "creative",
-            "communication": "communication",
-            "routine": "routine",
-        }
-        load_type = task_dict.get("type", "routine")
-        cognitive_load = cognitive_map.get(load_type, "routine")
+        # cognitive_load shares one vocabulary with the API/frontend enum now,
+        # so the task type is stored directly (no translation table).
+        task_type = task_dict.get("type") or "light_focus"
+        cognitive_load = task_type.value if hasattr(task_type, "value") else str(task_type)
 
         # Convert effort (1-5) to minutes (15–75 minutes, clamped)
         effort = task_dict.get("estimated_effort", 3)
@@ -88,24 +81,14 @@ async def create_task(
             "updated_at": datetime.utcnow().isoformat(),
         }
         
-        print(f"Creating task with data: {task_data}")
+        logger.debug("creating_task", task_id=task_data["id"], user_id=task_data["user_id"])
         created_task = await db.create_task(task_data)
-        print(f"Task created successfully: {created_task}")
+        logger.debug("task_created", task_id=created_task.get("id") if created_task else None)
         
         # Map the database response back to the API response format
         if created_task:
-            # Reverse map database cognitive_load to API type
-            reverse_cognitive_map = {
-                "routine": "light_focus",
-                "deep_focus": "deep_focus",
-                "communication": "admin",
-                "physical": "physical",
-                "light_logic": "light_focus",
-                "creative": "light_focus",
-            }
-            db_cognitive_load = created_task.get("cognitive_load", "routine")
-            api_type = reverse_cognitive_map.get(db_cognitive_load, "light_focus")
-            
+            api_type = created_task.get("cognitive_load") or "light_focus"
+
             # Convert estimated_minutes back to effort level (1-5)
             estimated_minutes = created_task.get("estimated_minutes", 30)
             effort_level = max(1, min(5, round(estimated_minutes / 15)))
@@ -125,9 +108,7 @@ async def create_task(
             )
         return created_task
     except Exception as e:
-        print(f"Error creating task: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        logger.error("create_task_failed", error=str(e), exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create task: {str(e)}",
@@ -138,7 +119,7 @@ async def create_task(
 async def update_task(
     task_id: str,
     updates: TaskUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Update an existing task"""
     if db is None:
@@ -171,7 +152,7 @@ async def update_task(
 @router.delete("/{task_id}")
 async def delete_task(
     task_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Delete a task"""
     if db is None:

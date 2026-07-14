@@ -34,6 +34,11 @@ def initialize_firebase():
         logger.warning("Failed to initialize Firebase", error=str(e))
 
 
+def firebase_ready() -> bool:
+    """Whether the Firebase Admin SDK initialized (creds present + valid)."""
+    return _firebase_initialized
+
+
 class NotificationService:
     """Service for sending push notifications via Firebase Cloud Messaging"""
     

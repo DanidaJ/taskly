@@ -44,11 +44,11 @@ api.interceptors.response.use(
       if (isAuthCritical) {
         // User is actually logged out from backend, clear auth and redirect
         localStorage.removeItem('taskly-auth');
-        
-        // Only redirect if not already on landing/auth pages
+
+        // Send them to the real auth page; avoid a redirect loop if already there.
         const currentPath = window.location.pathname;
-        if (!currentPath.startsWith('/landing') && currentPath !== '/auth') {
-          window.location.href = '/landing';
+        if (currentPath !== '/app/auth') {
+          window.location.href = '/app/auth';
         }
       }
     }
@@ -286,6 +286,19 @@ export const commitmentService = {
 
   async delete(id: string) {
     await api.delete(`/profile/commitments/${id}`);
+  },
+};
+
+// First-run onboarding status
+export const onboardingService = {
+  async getStatus(): Promise<{ has_onboarded: boolean }> {
+    const response = await api.get('/profile/onboarding');
+    return response.data;
+  },
+
+  async complete(timezone?: string): Promise<{ has_onboarded: boolean }> {
+    const response = await api.post('/profile/onboarding', timezone ? { timezone } : {});
+    return response.data;
   },
 };
 

@@ -1,185 +1,149 @@
-from datetime import datetime, timedelta
-from typing import Optional
+import asyncio
+import time
+
+import httpx
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.core.config import settings
 import structlog
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+logger = structlog.get_logger()
+
 security = HTTPBearer()
+# Optional Bearer security - doesn't fail if no token provided
+optional_security = HTTPBearer(auto_error=False)
+
+# Supabase signs user access tokens with asymmetric JWT signing keys (ES256/RS256)
+# and publishes the matching *public* keys at this JWKS endpoint. We verify tokens
+# against those public keys, so no shared secret is stored or trusted server-side.
+_JWKS_URL = f"{settings.supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
+_JWKS_TTL_SECONDS = 3600  # re-fetch the key set at most once an hour
+_ALLOWED_ALGORITHMS = ["ES256", "RS256"]
+
+_jwks_lock = asyncio.Lock()
+_jwks_by_kid: dict[str, dict] = {}
+_jwks_fetched_at: float = 0.0
 
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+async def _refresh_jwks() -> None:
+    """Fetch and cache the project's public signing keys, indexed by ``kid``."""
+    global _jwks_by_kid, _jwks_fetched_at
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(_JWKS_URL)
+    resp.raise_for_status()
+    keys = resp.json().get("keys", [])
+    _jwks_by_kid = {k["kid"]: k for k in keys if k.get("kid")}
+    _jwks_fetched_at = time.monotonic()
 
 
-def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+async def _get_signing_key(kid: str) -> dict | None:
+    """Return the JWK for ``kid``, refreshing the cache when missing or stale.
+
+    The refresh is guarded by a lock so a burst of requests with an unknown kid
+    (e.g. right after Supabase rotates keys) triggers a single network fetch.
+    """
+    stale = (time.monotonic() - _jwks_fetched_at) > _JWKS_TTL_SECONDS
+    if kid in _jwks_by_kid and not stale:
+        return _jwks_by_kid[kid]
+    async with _jwks_lock:
+        # Re-check inside the lock: another coroutine may have just refreshed.
+        stale = (time.monotonic() - _jwks_fetched_at) > _JWKS_TTL_SECONDS
+        if kid not in _jwks_by_kid or stale:
+            await _refresh_jwks()
+    return _jwks_by_kid.get(kid)
 
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, settings.jwt_secret, algorithm=settings.jwt_algorithm)
-    return encoded_jwt
+async def warm_jwks_cache() -> None:
+    """Best-effort prefetch of the JWKS, called once at application startup."""
+    async with _jwks_lock:
+        await _refresh_jwks()
 
 
-def decode_token(token: str) -> dict:
+async def _decode_supabase_token(token: str) -> dict:
+    """Verify a Supabase access token against the project's public JWKS.
+
+    Checks the asymmetric signature (ES256/RS256), the expiry (``exp``), and the
+    audience (``aud`` must be ``authenticated``). Raises ``jose.JWTError`` on any
+    validation failure. There is no unsigned-decode fallback.
+    """
+    kid = jwt.get_unverified_header(token).get("kid")
+    if not kid:
+        raise JWTError("token header missing 'kid'")
+    jwk = await _get_signing_key(kid)
+    if jwk is None:
+        raise JWTError(f"no matching JWKS key for kid={kid}")
+    return jwt.decode(
+        token,
+        jwk,
+        algorithms=_ALLOWED_ALGORITHMS,
+        audience="authenticated",
+    )
+
+
+def _user_from_payload(payload: dict) -> dict | None:
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+    return {
+        "user_id": user_id,
+        "email": payload.get("email"),
+        "role": payload.get("role", "authenticated"),
+    }
+
+
+async def validate_supabase_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    """Required auth dependency.
+
+    Returns the authenticated user only when the Supabase JWT verifies against
+    the public JWKS (signature + exp + aud). Responds 401 for an invalid token,
+    503 if the key set cannot be reached.
+    """
     try:
-        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
-        return payload
-    except JWTError:
+        payload = await _decode_supabase_token(credentials.credentials)
+    except JWTError as exc:
+        logger.warning("token_validation_failed", error=str(exc))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
-    """
-    Dependency to get the current authenticated user from JWT token.
-    Supports both custom JWT and Supabase JWT tokens.
-    """
-    token = credentials.credentials
-    logger = structlog.get_logger()
-    
-    # Try custom JWT validation first (our own tokens)
-    try:
-        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
-        user_id = payload.get("sub")
-        if user_id:
-            return {
-                "user_id": user_id,
-                "email": payload.get("email"),
-                "role": payload.get("role", "authenticated")
-            }
-    except Exception:
-        pass  # Fall through to try Supabase token
-    
-    # Try Supabase token (decode without signature verification for now)
-    # In production, you should validate with Supabase JWT secret
-    try:
-        payload = jwt.decode(
-            token,
-            key="",
-            options={
-                "verify_signature": False, 
-                "verify_exp": False,
-                "verify_aud": False
-            }
+    except Exception as exc:  # JWKS fetch / network failure
+        logger.error("jwks_unavailable", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication temporarily unavailable",
         )
-        user_id = payload.get("sub")
-        if user_id:
-            return {
-                "user_id": user_id,
-                "email": payload.get("email"),
-                "role": payload.get("role", "authenticated")
-            }
-    except Exception as e:
-        logger.warning("Token validation failed", error=str(e))
-    
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
 
-
-# Alternative: Validate Supabase JWT tokens
-async def validate_supabase_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
-    """
-    Validate Supabase JWT token.
-    """
-    try:
-        token = credentials.credentials
-        payload = jwt.decode(
-            token,
-            settings.supabase_jwt_secret,
-            algorithms=["HS256"],
-            audience="authenticated"
-        )
-        return {
-            "user_id": payload.get("sub"),
-            "email": payload.get("email"),
-            "role": payload.get("role")
-        }
-    except JWTError as e:
+    user = _user_from_payload(payload)
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {str(e)}",
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-
-
-# Optional Bearer security - doesn't fail if no token provided
-optional_security = HTTPBearer(auto_error=False)
+    return user
 
 
 async def get_optional_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(optional_security)
+    credentials: HTTPAuthorizationCredentials | None = Depends(optional_security),
 ) -> dict | None:
-    """
-    Optional dependency to get the current user. Returns None if no token or invalid token.
-    Useful for endpoints that can work without authentication.
+    """Optional auth dependency.
+
+    Returns the verified user when a valid Supabase token is supplied, or
+    ``None`` when the token is absent, invalid, or unverifiable. Never trusts an
+    unverified token and never falls back to a demo user.
     """
     if credentials is None:
         return None
-    
     try:
-        token = credentials.credentials
-        
-        # First try to validate as Supabase token
-        if settings.supabase_jwt_secret:
-            try:
-                payload = jwt.decode(
-                    token,
-                    settings.supabase_jwt_secret,
-                    algorithms=["HS256"],
-                    audience="authenticated"
-                )
-                return {
-                    "user_id": payload.get("sub"),
-                    "email": payload.get("email"),
-                    "role": payload.get("role")
-                }
-            except JWTError:
-                pass
-        
-        # In debug mode, decode token without verification
-        if settings.DEBUG:
-            try:
-                payload = jwt.decode(token, options={"verify_signature": False})
-                user_id = payload.get("sub")
-                if user_id:
-                    return {
-                        "user_id": user_id,
-                        "email": payload.get("email"),
-                        "role": payload.get("role", "authenticated")
-                    }
-            except JWTError:
-                pass
-            # If token decoding fails in debug mode, return demo user
-            return {"user_id": "demo-user", "email": "demo@example.com", "role": "authenticated"}
-        
-        # Try custom JWT
-        payload = decode_token(token)
-        user_id = payload.get("sub")
-        if user_id:
-            return {"user_id": user_id, "email": payload.get("email")}
+        payload = await _decode_supabase_token(credentials.credentials)
+    except JWTError:
         return None
-    except Exception:
-        if settings.DEBUG:
-            return {"user_id": "demo-user", "email": "demo@example.com", "role": "authenticated"}
+    except Exception as exc:  # JWKS unavailable -> treat request as anonymous
+        logger.warning("jwks_unavailable_optional", error=str(exc))
         return None
+
+    return _user_from_payload(payload)

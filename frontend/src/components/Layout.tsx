@@ -14,6 +14,7 @@ import {
   BarChart3,
   Plus,
   Inbox,
+  HelpCircle,
 } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useAuthStore } from '@/stores/authStore';
@@ -22,6 +23,7 @@ import { clsx } from 'clsx';
 import QuickCapture from './QuickCapture';
 import MiniFocusCountdown from './MiniFocusCountdown';
 import GlobalTimerCompletionPrompt from './GlobalTimerCompletionPrompt';
+import OnboardingGate from './onboarding/OnboardingGate';
 
 const navigation = [
   { name: 'Dashboard', href: '/app', icon: LayoutDashboard },
@@ -133,6 +135,20 @@ export default function Layout() {
             })}
           </nav>
 
+          {/* Help / How it works — opens the guide in a new tab so the app
+              session and any running timer aren't disrupted. */}
+          <div className="px-2 pb-1">
+            <a
+              href="/how-it-works"
+              target="_blank"
+              rel="noreferrer"
+              className="nav-item"
+            >
+              <HelpCircle className="w-5 h-5" />
+              Help &amp; Guide
+            </a>
+          </div>
+
           {/* User section */}
           <div className="p-3 border-t border-gray-200/50">
             <div className="flex items-center gap-3 px-3 py-2">
@@ -213,6 +229,9 @@ export default function Layout() {
       {/* App-global timer completion prompt: surfaces the mandatory yes/no
           on every page so the user can't dodge it by leaving FocusTimer. */}
       <GlobalTimerCompletionPrompt />
+
+      {/* First-run setup wizard — shows once for users who haven't onboarded. */}
+      <OnboardingGate />
     </div>
   );
 }

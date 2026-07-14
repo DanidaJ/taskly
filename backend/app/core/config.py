@@ -11,10 +11,13 @@ class Settings(BaseSettings):
     
     # Database
     database_url: str = "postgresql://localhost:5432/taskly"
-    supabase_url: str = ""
+    # Required: the app verifies every user token against this project's public
+    # JWKS at {supabase_url}/auth/v1/.well-known/jwks.json, so there is no safe
+    # default. (Supabase signs user tokens with asymmetric keys — no shared
+    # secret is needed server-side.)
+    supabase_url: str
     supabase_publishable_key: str = ""  # Public key (safe for client)
     supabase_secret_key: str = ""  # Secret key (server-side only)
-    supabase_jwt_secret: str = ""  # JWT secret for validating Supabase tokens
     
     # Mistral AI (using custom agent)
     mistral_api_key: str = ""
@@ -37,11 +40,6 @@ class Settings(BaseSettings):
     notifications_default_timezone: str = "UTC"
     notifications_break_interval_minutes: int = 0  # 0 = disabled (per-user only)
     
-    # JWT
-    jwt_secret: str = "your-secret-key-change-in-production"
-    jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 1440  # 24 hours
-    
     # CORS
     cors_origins: str = '["http://localhost:5173","http://localhost:3000"]'
     
@@ -55,6 +53,9 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        # Ignore unrelated/legacy env vars (e.g. the old JWT_SECRET from before
+        # the custom-JWT path was dropped) instead of crashing on startup.
+        extra = "ignore"
 
 
 settings = Settings()

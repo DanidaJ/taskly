@@ -33,6 +33,12 @@ export function getStartContext(task: PlannedTask, taskDate?: string | null): St
 
   const scheduledEnd = new Date(dateStr);
   scheduledEnd.setHours(eH, eM, 0, 0);
+  // Cross-midnight window (e.g. 23:00–01:00): the end belongs to the NEXT day.
+  // Without this, a task starting 23:00 reads as "expired 22h ago" the moment
+  // its start passes. Mirrors is_task_missed / checkMissedTasks.
+  if (eH * 60 + eM <= sH * 60 + sM) {
+    scheduledEnd.setDate(scheduledEnd.getDate() + 1);
+  }
 
   if (now > scheduledEnd) {
     const minutesLate = Math.round((now.getTime() - scheduledEnd.getTime()) / 60000);

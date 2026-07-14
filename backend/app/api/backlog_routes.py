@@ -10,7 +10,7 @@ from typing import List
 from datetime import datetime
 import uuid
 
-from app.core.security import get_current_user
+from app.core.security import validate_supabase_token
 from app.core.database import db
 from app.models import (
     BacklogItemCreate,
@@ -34,7 +34,7 @@ def _api_priority_to_db(api_priority: str) -> str:
 
 
 @router.get("", response_model=List[BacklogItemResponse])
-async def list_backlog_items(current_user: dict = Depends(get_current_user)):
+async def list_backlog_items(current_user: dict = Depends(validate_supabase_token)):
     """Return all backlog items for the current user, newest first."""
     user_id = current_user["user_id"]
     items = await db.get_backlog_items(user_id)
@@ -44,7 +44,7 @@ async def list_backlog_items(current_user: dict = Depends(get_current_user)):
 @router.post("", response_model=BacklogItemResponse, status_code=201)
 async def create_backlog_item(
     item: BacklogItemCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Add a new item to the backlog."""
     user_id = current_user["user_id"]
@@ -61,7 +61,7 @@ async def create_backlog_item(
 async def update_backlog_item(
     item_id: str,
     updates: BacklogItemUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Update name, duration, priority, etc. of a backlog item."""
     user_id = current_user["user_id"]
@@ -82,7 +82,7 @@ async def update_backlog_item(
 @router.delete("/{item_id}", status_code=204)
 async def delete_backlog_item(
     item_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Remove an item from the backlog without scheduling it."""
     user_id = current_user["user_id"]
@@ -96,7 +96,7 @@ async def delete_backlog_item(
 async def schedule_backlog_item(
     item_id: str,
     request: BacklogScheduleRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """
     Materialize a backlog item into a planned_task on the given date.
@@ -156,7 +156,7 @@ async def schedule_backlog_item(
         "scheduled_start": sched_start,
         "scheduled_end": sched_end,
         "estimated_minutes": estimated_minutes,
-        "cognitive_load": item.get("cognitive_load", "routine"),
+        "cognitive_load": item.get("cognitive_load", "light_focus"),
         "priority": _api_priority_to_db(item.get("priority", "medium")),
         "status": "not_started",
         "flexibility": "flexible",

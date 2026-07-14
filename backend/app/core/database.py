@@ -1,8 +1,14 @@
+from datetime import datetime, timezone
 from supabase import create_client, Client
 from app.core.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now_iso() -> str:
+    """Current UTC time as an ISO-8601 string (offset-aware)."""
+    return datetime.now(timezone.utc).isoformat()
 
 _supabase_client: Client | None = None
 
@@ -91,6 +97,17 @@ class SupabaseDB:
         response = self.client.table('planned_tasks').insert(tasks).execute()
         return response.data
 
+    async def replace_planned_tasks(self, plan_id: str, tasks: list) -> list:
+        """Atomically replace a plan's planned tasks (delete old + insert new)
+        in a single transaction via the replace_planned_tasks Postgres function,
+        so a failed insert can't leave the plan with its tasks deleted and none
+        re-inserted. Returns the inserted rows."""
+        response = self.client.rpc(
+            'replace_planned_tasks',
+            {'p_plan_id': plan_id, 'p_tasks': tasks},
+        ).execute()
+        return response.data or []
+
     async def update_planned_task(self, task_id: str, updates: dict):
         """Update a single planned task by id."""
         response = self.client.table('planned_tasks').update(updates).eq('id', task_id).execute()
@@ -134,7 +151,22 @@ class SupabaseDB:
     async def save_user_preferences(self, preferences_data: dict):
         response = self.client.table('user_preferences').upsert(preferences_data).execute()
         return response.data[0] if response.data else None
-    
+
+    # Onboarding status (first-run wizard)
+    async def get_onboarding_status(self, user_id: str):
+        response = self.client.table('user_onboarding').select('*').eq('user_id', user_id).execute()
+        return response.data[0] if response.data else None
+
+    async def set_onboarding_status(self, user_id: str, has_onboarded: bool):
+        row = {
+            'user_id': user_id,
+            'has_onboarded': has_onboarded,
+            'completed_at': _utc_now_iso() if has_onboarded else None,
+            'updated_at': _utc_now_iso(),
+        }
+        response = self.client.table('user_onboarding').upsert(row).execute()
+        return response.data[0] if response.data else None
+
     # Commitments
     async def get_commitments(self, user_id: str):
         response = self.client.table('commitments').select('*').eq('user_id', user_id).order('start_time').execute()
@@ -265,7 +297,7 @@ class SupabaseDB:
         return response.data[0] if response.data else None
 
     async def update_recurring_task(self, task_id: str, updates: dict):
-        updates['updated_at'] = 'now()'
+        updates['updated_at'] = _utc_now_iso()
         response = self.client.table('recurring_tasks').update(updates).eq('id', task_id).execute()
         return response.data[0] if response.data else None
 
@@ -305,7 +337,7 @@ class SupabaseDB:
         return response.data[0] if response.data else None
 
     async def update_routine_template(self, template_id: str, updates: dict):
-        updates['updated_at'] = 'now()'
+        updates['updated_at'] = _utc_now_iso()
         response = self.client.table('routine_templates').update(updates).eq('id', template_id).execute()
         return response.data[0] if response.data else None
 
@@ -331,7 +363,7 @@ class SupabaseDB:
         return response.data[0] if response.data else None
 
     async def update_backlog_item(self, item_id: str, updates: dict):
-        updates['updated_at'] = 'now()'
+        updates['updated_at'] = _utc_now_iso()
         response = self.client.table('backlog_items').update(updates).eq('id', item_id).execute()
         return response.data[0] if response.data else None
 
@@ -367,7 +399,7 @@ class SupabaseDB:
         return response.data[0] if response.data else None
 
     async def update_project(self, project_id: str, updates: dict):
-        updates['updated_at'] = 'now()'
+        updates['updated_at'] = _utc_now_iso()
         response = self.client.table('projects').update(updates).eq('id', project_id).execute()
         return response.data[0] if response.data else None
 
@@ -395,7 +427,7 @@ class SupabaseDB:
         return response.data[0] if response.data else None
 
     async def update_project_subtask(self, subtask_id: str, updates: dict):
-        updates['updated_at'] = 'now()'
+        updates['updated_at'] = _utc_now_iso()
         response = self.client.table('project_subtasks').update(updates).eq('id', subtask_id).execute()
         return response.data[0] if response.data else None
 
@@ -444,6 +476,27 @@ class SupabaseDB:
         prefs = {**prefs, "updated_at": datetime.utcnow().isoformat()}
         response = self.client.table('notification_preferences').upsert(prefs, on_conflict='user_id').execute()
         return response.data[0] if response.data else None
+
+    async def ensure_notification_timezone(self, user_id: str, tz_name: str) -> dict | None:
+        """Persist ``tz_name`` into notification_preferences only if the user has
+        no timezone yet. Creates the prefs row (other columns take DB defaults)
+        when none exists. This is the single tz store read by get_user_timezone
+        and the notification scheduler, so setting it here fixes missed-detection,
+        reminder timing, and rescheduling for users who never open notif settings.
+        Callers are responsible for validating ``tz_name`` (IANA)."""
+        existing = await self.get_notification_preferences(user_id)
+        if not existing:
+            return await self.save_notification_preferences({
+                "user_id": user_id,
+                "timezone": tz_name,
+            })
+        if not (existing.get("timezone") or "").strip():
+            return await self.save_notification_preferences({
+                **existing,
+                "user_id": user_id,
+                "timezone": tz_name,
+            })
+        return existing
 
     async def has_sent_notification(self, user_id: str, dedupe_key: str) -> bool:
         response = self.client.table('notification_log').select('id').eq('user_id', user_id).eq('dedupe_key', dedupe_key).execute()

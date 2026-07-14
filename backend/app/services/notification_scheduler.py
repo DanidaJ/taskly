@@ -64,66 +64,102 @@ async def task_reminder_tick():
             logger.warning("scheduler: task reminder failed", user_id=user_id, error=str(e))
 
 
-async def _process_user_task_reminders(user_id: str):
+async def _process_user_task_reminders(user_id: str, dry_run: bool = False) -> dict:
+    """Evaluate (and, unless dry_run, send) this user's due task reminders.
+
+    Returns a diagnostic report describing what it saw and did — the scheduler
+    ignores the return value; the debug endpoint uses it.
+    """
+    report: dict = {"user_id": user_id, "reason": None, "tasks": []}
     prefs = await db.get_notification_preferences(user_id) or {}
+    report["enabled"] = bool(prefs.get("enabled", True))
+    report["task_reminders_pref"] = bool(prefs.get("task_reminders", True))
     if not prefs.get("enabled", True) or not prefs.get("task_reminders", True):
-        return
+        report["reason"] = "notifications or task-reminders turned off in preferences"
+        return report
 
     tz = _user_tz(prefs)
     minutes_before = int(prefs.get("reminder_minutes_before", 15))
     now_local = datetime.now(tz)
     today_str = now_local.date().isoformat()
+    report.update({
+        "timezone": str(tz),
+        "now_local": now_local.strftime("%Y-%m-%d %H:%M:%S"),
+        "today": today_str,
+        "reminder_minutes_before": minutes_before,
+    })
 
     plan = await db.get_daily_plan(user_id, today_str)
     if not plan:
-        return
+        report["reason"] = f"no daily plan for {today_str}"
+        return report
     tasks = plan.get("planned_tasks") or []
+    report["task_count"] = len(tasks)
     fire_window = timedelta(minutes=5)
 
     for t in tasks:
         start_str = t.get("scheduled_start")
+        status = (t.get("status") or "").lower()
+        entry: dict = {"name": t.get("name"), "scheduled_start": start_str, "status": status}
         if not start_str:
+            entry["skipped"] = "no scheduled_start"
+            report["tasks"].append(entry)
             continue
-        if (t.get("status") or "").lower() in ("completed", "skipped", "cancelled"):
+        if status in ("completed", "skipped", "cancelled"):
+            entry["skipped"] = f"status={status}"
+            report["tasks"].append(entry)
             continue
         start_t = _parse_hhmm(start_str[:5])
         if not start_t:
+            entry["skipped"] = "unparseable start time"
+            report["tasks"].append(entry)
             continue
         start_dt = tz.localize(datetime.combine(now_local.date(), start_t))
+        fire_at = start_dt - timedelta(minutes=minutes_before)
+        in_pre = minutes_before > 0 and fire_at <= now_local < fire_at + fire_window
+        in_now = start_dt <= now_local < start_dt + fire_window
+        entry.update({
+            "pre_reminder_window": f"{fire_at.strftime('%H:%M')}–{(fire_at + fire_window).strftime('%H:%M')}",
+            "now_reminder_window": f"{start_dt.strftime('%H:%M')}–{(start_dt + fire_window).strftime('%H:%M')}",
+            "in_pre_window": in_pre,
+            "in_now_window": in_now,
+        })
 
         # 1) "Starts in X minutes" reminder
-        fire_at = start_dt - timedelta(minutes=minutes_before)
-        # Fire window: [fire_at, fire_at + 5m)
-        if minutes_before > 0 and fire_at <= now_local < fire_at + fire_window:
+        if in_pre:
             dedupe = f"task_reminder:{t['id']}:{today_str}"
-            await notification_service.send_to_user(
-                user_id=user_id,
-                title=f"Up next: {t.get('name', 'Task')}",
-                body=f"Starts in {minutes_before} min ({start_str[:5]})",
-                notif_type="task_reminder",
-                data={
-                    "task_id": str(t.get("id", "")),
-                    "url": "/app/schedule",
-                },
-                dedupe_key=dedupe,
-            )
+            if dry_run:
+                entry["pre_already_sent"] = await db.has_sent_notification(user_id, dedupe)
+                entry["would_send_pre"] = True
+            else:
+                entry["sent_pre"] = await notification_service.send_to_user(
+                    user_id=user_id,
+                    title=f"Up next: {t.get('name', 'Task')}",
+                    body=f"Starts in {minutes_before} min ({start_str[:5]})",
+                    notif_type="task_reminder",
+                    data={"task_id": str(t.get("id", "")), "url": "/app/schedule"},
+                    dedupe_key=dedupe,
+                )
 
         # 2) "Scheduled now" reminder at exact start time
-        if start_dt <= now_local < start_dt + fire_window:
+        if in_now:
             dedupe_now = f"task_start:{t['id']}:{today_str}"
             task_name = t.get("name", "Task")
-            await notification_service.send_to_user(
-                user_id=user_id,
-                title=f"Now: {task_name}",
-                body=f'You have "{task_name}" scheduled now.',
-                notif_type="task_reminder",
-                data={
-                    "task_id": str(t.get("id", "")),
-                    "url": "/app/schedule",
-                    "event": "task_start",
-                },
-                dedupe_key=dedupe_now,
-            )
+            if dry_run:
+                entry["now_already_sent"] = await db.has_sent_notification(user_id, dedupe_now)
+                entry["would_send_now"] = True
+            else:
+                entry["sent_now"] = await notification_service.send_to_user(
+                    user_id=user_id,
+                    title=f"Now: {task_name}",
+                    body=f'You have "{task_name}" scheduled now.',
+                    notif_type="task_reminder",
+                    data={"task_id": str(t.get("id", "")), "url": "/app/schedule", "event": "task_start"},
+                    dedupe_key=dedupe_now,
+                )
+        report["tasks"].append(entry)
+
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +272,24 @@ def start_scheduler():
     _scheduler.add_job(daily_time_tick, "interval", minutes=5, id="daily_time_tick", coalesce=True, max_instances=1)
     _scheduler.start()
     logger.info("notification scheduler started")
+
+
+def scheduler_status() -> dict:
+    """Introspect the background scheduler for diagnostics."""
+    if _scheduler is None:
+        return {
+            "running": False,
+            "reason": "scheduler not started (NOTIFICATIONS_ENABLED false, or startup raised)",
+            "jobs": [],
+        }
+    jobs = [
+        {
+            "id": j.id,
+            "next_run": j.next_run_time.isoformat() if j.next_run_time else None,
+        }
+        for j in _scheduler.get_jobs()
+    ]
+    return {"running": bool(getattr(_scheduler, "running", False)), "jobs": jobs}
 
 
 def stop_scheduler():

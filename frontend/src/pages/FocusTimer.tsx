@@ -658,7 +658,9 @@ export default function FocusTimer() {
         duration: effectiveSessionSeconds,
         mode: 'focus',
         completed: true,
-        session_date: format(new Date(), 'yyyy-MM-dd'),
+        // Date by when the session started, not when it's saved — a session that
+        // runs across midnight belongs to the day it began.
+        session_date: format(startTime, 'yyyy-MM-dd'),
       })
         .then((saved: any) => {
           setTodaySessions(prev => prev.map(s => (s.id === tempId ? { ...s, id: saved.id } : s)));

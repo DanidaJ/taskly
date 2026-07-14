@@ -3,7 +3,7 @@ from typing import List
 from datetime import datetime, date as date_type
 import uuid
 
-from app.core.security import get_current_user
+from app.core.security import validate_supabase_token
 from app.core.database import db
 from app.models import (
     RecurringTaskCreate,
@@ -24,7 +24,7 @@ router = APIRouter(prefix="/recurring", tags=["Recurring Tasks"])
 @router.get("/tasks", response_model=List[RecurringTaskResponse])
 async def get_recurring_tasks(
     active_only: bool = True,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get all recurring tasks for the current user"""
     user_id = current_user["user_id"]
@@ -35,7 +35,7 @@ async def get_recurring_tasks(
 @router.get("/tasks/{task_id}", response_model=RecurringTaskResponse)
 async def get_recurring_task(
     task_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get a single recurring task"""
     user_id = current_user["user_id"]
@@ -48,7 +48,7 @@ async def get_recurring_task(
 @router.post("/tasks", response_model=RecurringTaskResponse, status_code=201)
 async def create_recurring_task(
     task: RecurringTaskCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Create a new recurring task"""
     user_id = current_user["user_id"]
@@ -78,7 +78,7 @@ async def create_recurring_task(
 async def update_recurring_task(
     task_id: str,
     updates: RecurringTaskUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Update a recurring task"""
     user_id = current_user["user_id"]
@@ -107,7 +107,7 @@ async def update_recurring_task(
 @router.delete("/tasks/{task_id}", status_code=204)
 async def delete_recurring_task(
     task_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Delete a recurring task"""
     user_id = current_user["user_id"]
@@ -120,7 +120,7 @@ async def delete_recurring_task(
 @router.post("/tasks/{task_id}/toggle", response_model=RecurringTaskResponse)
 async def toggle_recurring_task(
     task_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Toggle a recurring task active/inactive"""
     user_id = current_user["user_id"]
@@ -139,7 +139,7 @@ async def toggle_recurring_task(
 @router.get("/for-date/{date_str}")
 async def get_recurring_tasks_for_date(
     date_str: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     user_id = current_user["user_id"]
     """Get recurring tasks that should fire on a specific date.
@@ -198,7 +198,7 @@ async def get_recurring_tasks_for_date(
 
 @router.get("/templates", response_model=List[RoutineTemplateResponse])
 async def get_routine_templates(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get all routine templates with their tasks"""
     user_id = current_user["user_id"]
@@ -209,7 +209,7 @@ async def get_routine_templates(
 @router.get("/templates/{template_id}", response_model=RoutineTemplateResponse)
 async def get_routine_template(
     template_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get a single routine template with its tasks"""
     user_id = current_user["user_id"]
@@ -222,7 +222,7 @@ async def get_routine_template(
 @router.post("/templates", response_model=RoutineTemplateResponse, status_code=201)
 async def create_routine_template(
     template: RoutineTemplateCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Create a routine template, optionally with tasks"""
     user_id = current_user["user_id"]
@@ -262,7 +262,7 @@ async def create_routine_template(
 async def update_routine_template(
     template_id: str,
     updates: RoutineTemplateUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Update a routine template"""
     user_id = current_user["user_id"]
@@ -282,7 +282,7 @@ async def update_routine_template(
 @router.delete("/templates/{template_id}", status_code=204)
 async def delete_routine_template(
     template_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Delete a routine template (tasks FK set to NULL)"""
     user_id = current_user["user_id"]
@@ -344,7 +344,7 @@ PRESET_TEMPLATES = {
 @router.post("/templates/apply-preset/{preset_key}", response_model=RoutineTemplateResponse, status_code=201)
 async def apply_preset_template(
     preset_key: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Apply a built-in preset routine template"""
     user_id = current_user["user_id"]

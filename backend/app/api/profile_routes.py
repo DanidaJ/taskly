@@ -1,8 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
+from typing import Optional
 from datetime import datetime
 import uuid
+import pytz
 
-from app.core.security import get_current_user
+from app.core.security import validate_supabase_token
 from app.core.database import db
 from app.models import (
     EnergyProfileCreate,
@@ -23,7 +26,7 @@ router = APIRouter(prefix="/profile", tags=["User Profile"])
 # Energy Profile
 @router.get("/energy", response_model=EnergyProfile)
 async def get_energy_profile(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get the user's energy profile"""
     if db is None:
@@ -44,7 +47,7 @@ async def get_energy_profile(
 @router.post("/energy", response_model=EnergyProfile)
 async def save_energy_profile(
     profile: EnergyProfileCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Save/update the user's energy profile"""
     if db is None:
@@ -70,7 +73,7 @@ async def save_energy_profile(
 # Sleep Schedule
 @router.get("/sleep", response_model=SleepSchedule)
 async def get_sleep_schedule(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get the user's sleep schedule"""
     if db is None:
@@ -91,7 +94,7 @@ async def get_sleep_schedule(
 @router.post("/sleep", response_model=SleepSchedule)
 async def save_sleep_schedule(
     schedule: SleepScheduleCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Save/update the user's sleep schedule"""
     if db is None:
@@ -117,7 +120,7 @@ async def save_sleep_schedule(
 # User Preferences
 @router.get("/preferences", response_model=UserPreferences)
 async def get_user_preferences(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get the user's preferences"""
     if db is None:
@@ -138,7 +141,7 @@ async def get_user_preferences(
 @router.post("/preferences", response_model=UserPreferences)
 async def save_user_preferences(
     preferences: UserPreferencesCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Save/update the user's preferences"""
     if db is None:
@@ -149,8 +152,12 @@ async def save_user_preferences(
             **preferences.model_dump(),
         )
     
+    # Reuse the existing row's id so the upsert updates in place instead of
+    # minting a new UUID each save (matches energy/sleep handlers above).
+    existing = await db.get_user_preferences(current_user["user_id"])
+
     prefs_data = {
-        "id": str(uuid.uuid4()),
+        "id": existing["id"] if existing else str(uuid.uuid4()),
         "user_id": current_user["user_id"],
         **preferences.model_dump(),
         "updated_at": datetime.utcnow().isoformat(),
@@ -158,10 +165,57 @@ async def save_user_preferences(
     return await db.save_user_preferences(prefs_data)
 
 
+# Onboarding status (first-run setup wizard)
+@router.get("/onboarding")
+async def get_onboarding_status(
+    current_user: dict = Depends(validate_supabase_token),
+):
+    """Whether the user has completed the first-run setup wizard."""
+    if db is None:
+        return {"has_onboarded": False}
+
+    status_row = await db.get_onboarding_status(current_user["user_id"])
+    return {"has_onboarded": bool(status_row and status_row.get("has_onboarded"))}
+
+
+class OnboardingCompleteRequest(BaseModel):
+    # The browser's IANA timezone, captured once here so time-of-day logic
+    # (missed-detection, reminders, rescheduling) resolves in the user's zone
+    # instead of silently defaulting to UTC.
+    timezone: Optional[str] = None
+
+
+@router.post("/onboarding")
+async def complete_onboarding(
+    payload: Optional[OnboardingCompleteRequest] = None,
+    current_user: dict = Depends(validate_supabase_token),
+):
+    """Mark the first-run setup wizard as completed (or dismissed)."""
+    if db is None:
+        return {"has_onboarded": True}
+
+    # Persist the timezone if we got a valid one and the user has none yet.
+    # Best-effort: onboarding completion must still succeed if this fails.
+    tz = ((payload.timezone if payload else None) or "").strip()
+    if tz:
+        try:
+            pytz.timezone(tz)
+        except Exception:
+            tz = ""
+    if tz:
+        try:
+            await db.ensure_notification_timezone(current_user["user_id"], tz)
+        except Exception:
+            pass
+
+    status_row = await db.set_onboarding_status(current_user["user_id"], True)
+    return {"has_onboarded": bool(status_row and status_row.get("has_onboarded"))}
+
+
 # Commitments
 @router.get("/commitments", response_model=list[Commitment])
 async def get_commitments(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get all user commitments"""
     if db is None:
@@ -173,7 +227,7 @@ async def get_commitments(
 @router.post("/commitments", response_model=Commitment)
 async def create_commitment(
     commitment: CommitmentCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Create a new commitment"""
     if db is None:
@@ -204,7 +258,7 @@ async def create_commitment(
 @router.delete("/commitments/{commitment_id}")
 async def delete_commitment(
     commitment_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Delete a commitment"""
     if db is not None:
@@ -216,7 +270,7 @@ async def delete_commitment(
 @router.get("/logs", response_model=list[DailyLog])
 async def get_daily_logs(
     limit: int = 14,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get recent daily logs"""
     if db is None:
@@ -228,7 +282,7 @@ async def get_daily_logs(
 @router.post("/logs", response_model=DailyLog)
 async def save_daily_log(
     log: DailyLogCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Save a daily log"""
     if db is None:

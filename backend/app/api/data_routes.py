@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from datetime import datetime
 import uuid
 
-from app.core.security import get_current_user
+from app.core.security import validate_supabase_token
 from app.core.database import db
 from app.models import (
     FocusSessionCreate,
@@ -38,7 +38,7 @@ router = APIRouter(prefix="/data", tags=["Data Sync"])
 @router.get("/focus-sessions/{date}", response_model=list[FocusSession])
 async def get_focus_sessions(
     date: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get all focus sessions for a specific date (YYYY-MM-DD)"""
     if db is None:
@@ -50,7 +50,7 @@ async def get_focus_sessions(
 async def get_focus_sessions_range(
     start_date: str,
     end_date: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get focus sessions for a date range"""
     if db is None:
@@ -61,7 +61,7 @@ async def get_focus_sessions_range(
 @router.post("/focus-sessions", response_model=FocusSession)
 async def save_focus_session(
     session: FocusSessionCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Save a single focus session"""
     session_data = {
@@ -86,7 +86,7 @@ async def save_focus_session(
 @router.post("/focus-sessions/sync")
 async def sync_focus_sessions(
     bulk: FocusBulkSync,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Bulk sync: replace all sessions for a date with provided list"""
     if db is None:
@@ -112,7 +112,7 @@ async def sync_focus_sessions(
 
 @router.get("/active-focus-timer", response_model=ActiveFocusTimerResponse | None)
 async def get_active_focus_timer(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get the current active/paused focus timer snapshot for this user."""
     if db is None:
@@ -123,7 +123,7 @@ async def get_active_focus_timer(
 @router.put("/active-focus-timer", response_model=ActiveFocusTimerResponse)
 async def save_active_focus_timer(
     payload: ActiveFocusTimerUpsert,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Upsert active focus timer snapshot for this user."""
     timer_data = {
@@ -157,7 +157,7 @@ async def save_active_focus_timer(
 
 @router.delete("/active-focus-timer")
 async def clear_active_focus_timer(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Clear active focus timer snapshot for this user."""
     if db is not None:
@@ -172,7 +172,7 @@ async def clear_active_focus_timer(
 @router.get("/sleep-entries", response_model=list[SleepEntryResponse])
 async def get_sleep_entries(
     limit: int = 90,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get all sleep entries (most recent first)"""
     if db is None:
@@ -184,7 +184,7 @@ async def get_sleep_entries(
 async def get_sleep_entries_range(
     start_date: str,
     end_date: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get sleep entries for a date range"""
     if db is None:
@@ -195,7 +195,7 @@ async def get_sleep_entries_range(
 @router.post("/sleep-entries", response_model=SleepEntryResponse)
 async def save_sleep_entry(
     entry: SleepEntryCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Save/update a sleep entry (upserts on user_id + date)"""
     now_iso = datetime.utcnow().isoformat()
@@ -221,7 +221,7 @@ async def save_sleep_entry(
 @router.post("/sleep-entries/sync")
 async def sync_sleep_entries(
     bulk: SleepBulkSync,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Bulk sync: upsert multiple sleep entries"""
     if db is None:
@@ -244,7 +244,7 @@ async def sync_sleep_entries(
 @router.delete("/sleep-entries/{entry_id}")
 async def delete_sleep_entry(
     entry_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Delete a sleep entry"""
     if db is not None:
@@ -259,7 +259,7 @@ async def delete_sleep_entry(
 @router.get("/stats/{date}", response_model=DailyStatsResponse)
 async def get_daily_stats(
     date: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get daily stats for a specific date"""
     if db is None:
@@ -280,7 +280,7 @@ async def get_daily_stats(
 async def get_daily_stats_range(
     start_date: str,
     end_date: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get daily stats for a date range"""
     if db is None:
@@ -291,7 +291,7 @@ async def get_daily_stats_range(
 @router.post("/stats", response_model=DailyStatsResponse)
 async def save_daily_stats(
     stats: DailyStatsCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Save/update daily stats (upserts on user_id + date)"""
     now_iso = datetime.utcnow().isoformat()
@@ -319,7 +319,7 @@ async def save_daily_stats(
 
 @router.get("/focus-settings", response_model=FocusSettingsResponse)
 async def get_focus_settings(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get the user's focus timer settings. Returns defaults if not set."""
     user_id = current_user["user_id"]
@@ -334,7 +334,7 @@ async def get_focus_settings(
 @router.put("/focus-settings", response_model=FocusSettingsResponse)
 async def save_focus_settings(
     payload: FocusSettingsBase,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Save/update the user's focus timer settings."""
     user_id = current_user["user_id"]
@@ -350,7 +350,7 @@ async def save_focus_settings(
 
 @router.get("/sleep-goal", response_model=SleepGoalResponse)
 async def get_sleep_goal(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Get the user's sleep tracking goals. Returns defaults if not set."""
     user_id = current_user["user_id"]
@@ -365,7 +365,7 @@ async def get_sleep_goal(
 @router.put("/sleep-goal", response_model=SleepGoalResponse)
 async def save_sleep_goal(
     payload: SleepGoalBase,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Save/update the user's sleep tracking goals."""
     user_id = current_user["user_id"]
@@ -381,7 +381,7 @@ async def save_sleep_goal(
 
 @router.get("/user-patterns", response_model=list[UserPatternResponse])
 async def list_user_patterns(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """List all learned patterns for the current user."""
     if db is None:
@@ -392,7 +392,7 @@ async def list_user_patterns(
 @router.post("/user-patterns", response_model=UserPatternResponse)
 async def upsert_user_pattern(
     payload: UserPatternUpsert,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Upsert a learned pattern. Bumps usage_count + last_used on conflict."""
     if db is None:
@@ -412,7 +412,7 @@ async def upsert_user_pattern(
 @router.delete("/user-patterns/{pattern_id}")
 async def delete_user_pattern(
     pattern_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Delete a single learned pattern."""
     if db is not None:
@@ -422,7 +422,7 @@ async def delete_user_pattern(
 
 @router.delete("/user-patterns")
 async def clear_user_patterns(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """Delete all learned patterns for the current user."""
     if db is not None:

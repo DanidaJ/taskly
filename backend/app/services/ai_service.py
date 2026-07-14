@@ -815,15 +815,12 @@ class AIService:
             
             return result
         except Exception as e:
-            import traceback
-            print("=" * 60)
-            print("❌❌❌ EXCEPTION IN _enforce_schedule_constraints ❌❌❌")
-            print(f"Exception type: {type(e).__name__}")
-            print(f"Exception message: {str(e)}")
-            traceback.print_exc()
-            print("=" * 60)
-            logger.error("❌ Error enforcing schedule constraints - returning UNSCHEDULED tasks!", error=str(e), exc_info=True)
-            logger.error(f"Exception type: {type(e).__name__}, Details: {str(e)}")
+            logger.error(
+                "enforce_schedule_constraints_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True,
+            )
             # Return original plan if scheduling fails
             return plan_items
 
