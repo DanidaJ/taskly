@@ -181,7 +181,10 @@ async def daily_time_tick():
             logger.warning("scheduler: daily tick failed", user_id=user_id, error=str(e))
 
 
-async def _within(now_local: datetime, target: dtime, window_min: int = 5) -> bool:
+async def _within(now_local: datetime, target: dtime, window_min: int = 15) -> bool:
+    # Window is wider than the 5-min tick interval so a single dropped/slow tick
+    # (restart, load spike) still catches the target on a later tick. Per-day
+    # dedupe in send_to_user prevents this from ever double-firing.
     target_dt = now_local.replace(hour=target.hour, minute=target.minute, second=0, microsecond=0)
     return 0 <= (now_local - target_dt).total_seconds() < window_min * 60
 
@@ -244,9 +247,12 @@ async def _process_user_daily(user_id: str):
                 fire_at = sleep_dt - timedelta(minutes=wind_down_min)
                 # If sleep_time appears earlier than now (e.g. past midnight setting),
                 # try tomorrow's wind-down
-                if fire_at < now_local - timedelta(minutes=10):
+                # Only roll to tomorrow once today's wind-down is past the catch-up
+                # window; otherwise a 11–15-min-late tick would skip today.
+                if fire_at < now_local - timedelta(minutes=15):
                     fire_at += timedelta(days=1)
-                if 0 <= (now_local - fire_at).total_seconds() < 5 * 60:
+                # 15-min catch-up window (dedupe prevents double-fire).
+                if 0 <= (now_local - fire_at).total_seconds() < 15 * 60:
                     await notification_service.send_to_user(
                         user_id=user_id,
                         title="Wind-down time 🌙",

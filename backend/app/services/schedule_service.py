@@ -10,6 +10,7 @@ from app.models import (
     CognitiveLoad,
     Priority,
 )
+from app.core.timeutils import user_now
 
 logger = structlog.get_logger()
 
@@ -298,6 +299,7 @@ class ScheduleService:
         available_slots: List[Tuple[datetime, datetime]],
         base_date: datetime,
         earliest_start: Optional[time] = None,
+        user_tz: str = "UTC",
     ) -> List[Tuple[datetime, datetime]]:
         """Trim slots to honor (a) a user-stated earliest start and (b) the
         current time when scheduling for today. Safe to call repeatedly — it
@@ -318,8 +320,10 @@ class ScheduleService:
                         earliest=earliest_start.strftime('%H:%M'),
                         remaining_slots=len(slots))
 
-        # Filter out past time slots if scheduling for today
-        now = datetime.now()
+        # Filter out past time slots if scheduling for today — judged in the
+        # USER's timezone (naive wall-clock), so slots (also user wall-clock)
+        # compare apples-to-apples regardless of the server's zone.
+        now = user_now(user_tz).replace(tzinfo=None)
         if base_date.date() == now.date():
             filtered_slots = []
             for slot_start, slot_end in slots:
@@ -327,14 +331,14 @@ class ScheduleService:
                     logger.info(f"Skipping past slot: {slot_start.strftime('%H:%M')} - {slot_end.strftime('%H:%M')}")
                     continue
                 elif slot_start < now < slot_end:
-                    # Round up to next 15 minutes
+                    # Round up to the next 15-min boundary. Use timedelta so the
+                    # hour/day rolls over correctly — the old modulo math turned
+                    # 23:50 into 00:00 *today* (a time already in the past).
                     minutes = (now.minute // 15 + 1) * 15
-                    if minutes >= 60:
-                        adjusted = now.replace(hour=(now.hour + 1) % 24, minute=0, second=0, microsecond=0)
-                    else:
-                        adjusted = now.replace(minute=minutes, second=0, microsecond=0)
-                    logger.info(f"Adjusting partial past slot from {slot_start.strftime('%H:%M')} to {adjusted.strftime('%H:%M')}")
-                    filtered_slots.append((adjusted, slot_end))
+                    adjusted = now.replace(minute=0, second=0, microsecond=0) + timedelta(minutes=minutes)
+                    if adjusted < slot_end:
+                        logger.info(f"Adjusting partial past slot from {slot_start.strftime('%H:%M')} to {adjusted.strftime('%H:%M')}")
+                        filtered_slots.append((adjusted, slot_end))
                 else:
                     filtered_slots.append((slot_start, slot_end))
             slots = filtered_slots
@@ -390,6 +394,7 @@ class ScheduleService:
         energy_profile: EnergyProfile,
         existing_tasks: Optional[List[PlannedTask]] = None,
         earliest_start: Optional[time] = None,
+        user_tz: str = "UTC",
     ) -> List[PlannedTask]:
         """
         Assign actual time slots to planned tasks.
@@ -426,7 +431,7 @@ class ScheduleService:
             return planned_tasks
 
         # Honor earliest-start + current-time constraints
-        available_slots = self._apply_time_constraints(available_slots, base_date, earliest_start)
+        available_slots = self._apply_time_constraints(available_slots, base_date, earliest_start, user_tz)
 
         if not available_slots:
             logger.warning("No future time slots available")
@@ -504,7 +509,7 @@ class ScheduleService:
             # Re-apply earliest-start + past-time filtering: get_available_time_slots
             # returns the FULL day, so without this a flexible task could be placed
             # this morning (before "now") whenever a fixed task triggered this recompute.
-            available_slots = self._apply_time_constraints(available_slots, base_date, earliest_start)
+            available_slots = self._apply_time_constraints(available_slots, base_date, earliest_start, user_tz)
 
             if not available_slots:
                 logger.warning("No available slots after accounting for fixed tasks")

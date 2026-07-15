@@ -5,6 +5,7 @@ from mistralai import Mistral
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.core.config import settings
+from app.core.timeutils import user_now
 from app.models import (
     AIPlanResponse,
     AIPlanRequest,
@@ -207,13 +208,17 @@ def extract_task_count(text: str):
     return None
 
 
-def build_user_prompt(request: AIPlanRequest) -> str:
-    """Build the user prompt from the request data"""
+def build_user_prompt(request: AIPlanRequest, user_tz: str = "UTC") -> str:
+    """Build the user prompt from the request data.
+
+    ``user_tz`` is the requesting user's IANA timezone; "now"/"today" are judged
+    in it so the model is told the user's real local clock — not the server's.
+    """
     from app.services.schedule_service import schedule_service
     from datetime import datetime
 
     context = request.user_context
-    now = datetime.now()
+    now = user_now(user_tz).replace(tzinfo=None)
     
     logger.info("Building user prompt", 
                 target_date=request.target_date,
@@ -324,7 +329,7 @@ def build_user_prompt(request: AIPlanRequest) -> str:
 
     # Drop slots already in the past when planning for today, so the AI never
     # suggests a time that's already gone (e.g. "00:00-00:45" at 7pm).
-    available_slots = schedule_service._apply_time_constraints(available_slots, target_dt)
+    available_slots = schedule_service._apply_time_constraints(available_slots, target_dt, user_tz=user_tz)
 
     # Extract explicit task-count cap ("4 things", "do 3 tasks") if the user gave one
     task_count_cap = extract_task_count(request.raw_tasks_input)
@@ -631,10 +636,14 @@ class AIService:
             logger.error("Failed to parse AI response", error=str(e), response=response[:500])
             raise ValueError(f"Invalid JSON response from AI: {str(e)}")
     
-    async def generate_plan(self, request: AIPlanRequest) -> AIPlanResponse:
-        """Generate an AI-powered plan from raw task input using custom agent"""
+    async def generate_plan(self, request: AIPlanRequest, user_tz: str = "UTC") -> AIPlanResponse:
+        """Generate an AI-powered plan from raw task input using custom agent.
+
+        ``user_tz`` (the caller's IANA timezone) anchors all "now"/"today" logic
+        so planning is correct regardless of the server's timezone.
+        """
         # Build the user prompt with all context
-        user_input = build_user_prompt(request)
+        user_input = build_user_prompt(request, user_tz)
         
         try:
             response_text = await self._call_agent(user_input)
@@ -702,6 +711,7 @@ class AIService:
                 request.target_date,
                 request.user_context,
                 earliest_start=extract_earliest_start_time(request.raw_tasks_input),
+                user_tz=user_tz,
             )
             
             # Note: scheduled_start and scheduled_end are already set by _enforce_schedule_constraints
@@ -726,8 +736,13 @@ class AIService:
         target_date: str,
         user_context: UserContext,
         earliest_start=None,
+        user_tz: str = "UTC",
     ) -> list:
-        """Enforce schedule constraints using the schedule service"""
+        """Enforce schedule constraints using the schedule service.
+
+        ``user_tz`` is threaded down to ``enforce_timing`` so "today"/past-slot
+        filtering is judged in the user's local clock, not the server's.
+        """
         from app.services.schedule_service import schedule_service
         import re
         
@@ -792,6 +807,7 @@ class AIService:
                 user_context.energy_profile,
                 existing_tasks if existing_tasks else None,
                 earliest_start=earliest_start,
+                user_tz=user_tz,
             )
             
             logger.info("Schedule enforcement complete", scheduled_count=len(scheduled_tasks))

@@ -955,14 +955,15 @@ async def enforce_schedule_timing(
     # Convert to PlannedTask objects
     tasks = [PlannedTask(**t) for t in planned_tasks]
     
-    # Enforce timing
-    from datetime import date
+    # Enforce timing — "today" and past-slot filtering judged in the user's zone
+    user_tz = await get_user_timezone(user_id)
     scheduled_tasks = schedule_service.enforce_timing(
         tasks,
-        date.today().isoformat(),
+        user_now(user_tz).date().isoformat(),
         commitments,
         sleep_schedule,
         energy_profile,
+        user_tz=user_tz,
     )
     
     # Suggest breaks

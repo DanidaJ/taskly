@@ -22,6 +22,7 @@ import { focusSessionService, sleepEntryService } from '@/services/api';
 import { AIPlanResponse, UserContext } from '@/types';
 import { Button, Textarea } from '@/components/ui';
 import { TaskCard } from '@/components/tasks';
+import PlanPreview from './PlanPreview';
 import toast from 'react-hot-toast';
 
 interface ChatMessage {
@@ -687,9 +688,13 @@ export default function PlannerChat() {
                       <span className="text-sm font-medium">Based on your patterns</span>
                     </div>
                   )}
-                  <div className="whitespace-pre-wrap text-sm leading-relaxed">
-                    {message.content}
-                  </div>
+                  {message.type === 'plan' && message.planData ? (
+                    <PlanPreview plan={message.planData} />
+                  ) : (
+                    <div className="whitespace-pre-wrap text-sm leading-relaxed">
+                      {message.content}
+                    </div>
+                  )}
                 </div>
 
                 {/* Action buttons for plan messages */}

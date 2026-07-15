@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from app.core.security import get_optional_user
 from app.core.rate_limit import limiter
 from app.services import ai_service
+from app.api.plan_routes import get_user_timezone
 from app.models import (
     AIPlanRequest,
     AIPlanResponse,
@@ -31,7 +32,10 @@ async def generate_plan(
     - Provide recommendations for productivity
     """
     try:
-        return await ai_service.generate_plan(payload)
+        # Anchor "now"/"today" to the user's timezone (falls back to UTC when
+        # the request is unauthenticated).
+        user_tz = await get_user_timezone(current_user["user_id"]) if current_user else "UTC"
+        return await ai_service.generate_plan(payload, user_tz)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

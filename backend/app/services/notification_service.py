@@ -237,7 +237,12 @@ class NotificationService:
         if pref_key and not prefs.get(pref_key, True):
             return 0
 
-        if respect_quiet_hours and notif_type != "test":
+        # Quiet hours suppress system-initiated nudges only. A task_reminder
+        # fires because the user themselves scheduled a task at this time, so
+        # honoring it (e.g. a 07:00 task under 22:00–08:00 quiet hours) is what
+        # they asked for. "test" is always allowed too.
+        quiet_exempt = ("test", "task_reminder")
+        if respect_quiet_hours and notif_type not in quiet_exempt:
             try:
                 from datetime import datetime
                 import pytz

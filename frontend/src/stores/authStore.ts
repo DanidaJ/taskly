@@ -6,7 +6,12 @@ import { supabase } from '@/services/supabase';
 interface AuthStore extends AuthState {
   initialize: () => Promise<void>;
   signIn: (email: string, password: string) => Promise<void>;
-  signUp: (email: string, password: string, fullName?: string) => Promise<void>;
+  signUp: (
+    email: string,
+    password: string,
+    fullName?: string,
+  ) => Promise<{ needsEmailConfirmation: boolean; alreadyRegistered: boolean }>;
+  resendConfirmation: (email: string) => Promise<void>;
   signOut: () => Promise<void>;
   updateUser: (updates: Partial<User>) => void;
 }
@@ -145,9 +150,19 @@ export const useAuthStore = create<AuthStore>()(
             },
           });
           if (error) throw error;
-          
-          // Update state immediately if session is available
-          if (data.session && data.user) {
+
+          // Anti-enumeration: when the email already exists, Supabase returns a
+          // user with an EMPTY identities array and no session/error (so bad
+          // actors can't probe which emails are registered). Detect it so we can
+          // steer the user to sign in instead of showing a bogus "check email".
+          const alreadyRegistered =
+            !!data.user &&
+            Array.isArray(data.user.identities) &&
+            data.user.identities.length === 0;
+
+          // A session is only returned when email confirmation is OFF — in that
+          // case the user is signed in immediately.
+          if (data.session && data.user && !alreadyRegistered) {
             set({
               user: {
                 id: data.user.id,
@@ -164,13 +179,22 @@ export const useAuthStore = create<AuthStore>()(
               isAuthenticated: true,
               isLoading: false,
             });
-          } else {
-            set({ isLoading: false });
+            return { needsEmailConfirmation: false, alreadyRegistered: false };
           }
+
+          set({ isLoading: false });
+          return { needsEmailConfirmation: !alreadyRegistered, alreadyRegistered };
         } catch (error) {
           set({ isLoading: false });
           throw error;
         }
+      },
+
+      resendConfirmation: async (email: string) => {
+        // No emailRedirectTo — use the project's existing Site URL config, which
+        // is what the (already working) confirmation emails use.
+        const { error } = await supabase.auth.resend({ type: 'signup', email });
+        if (error) throw error;
       },
 
       signOut: async () => {
