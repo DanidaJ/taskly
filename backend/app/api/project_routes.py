@@ -14,6 +14,12 @@ import uuid
 from app.core.security import validate_supabase_token
 from app.core.database import db
 from app.services.ai_service import ai_service
+from app.api.plan_routes import (
+    get_user_timezone,
+    is_task_missed,
+    db_status_to_api,
+    normalize_time_format,
+)
 from app.models import (
     ProjectCreate,
     ProjectUpdate,
@@ -173,6 +179,49 @@ async def log_project_hours(
     await _owned_project(project_id, user_id)
     await db.log_project_hours(project_id, request.hours)
     return await db.get_project(project_id)
+
+
+# ---------------------------------------------------------------------------
+# Linked tasks (scheduled sessions advancing this project)
+# ---------------------------------------------------------------------------
+
+@router.get("/{project_id}/tasks")
+async def list_project_tasks(
+    project_id: str,
+    current_user: dict = Depends(validate_supabase_token),
+):
+    """Planned tasks manually linked to this project, across all dates, each with
+    its calendar state (upcoming / ongoing / completed / missed …) and the hours
+    it logged. Newest/soonest first. Powers the project detail view."""
+    user_id = current_user["user_id"]
+    await _owned_project(project_id, user_id)
+    if db is None:
+        return []
+
+    rows = await db.get_project_tasks(project_id, user_id)
+    user_tz = await get_user_timezone(user_id)
+    result = []
+    for t in rows:
+        plan_date = (t.get("daily_plans") or {}).get("date")
+        api_status = db_status_to_api(t.get("status", "not_started"))
+        # Derive "missed" for pending tasks whose window has passed, matching the
+        # calendar's state so the detail view and calendar agree.
+        if api_status == "pending" and plan_date and is_task_missed(t, str(plan_date), user_tz):
+            api_status = "missed"
+        result.append({
+            "id": t.get("id"),
+            "name": t.get("name"),
+            "date": str(plan_date) if plan_date else None,
+            "scheduled_start": normalize_time_format(t.get("scheduled_start")),
+            "scheduled_end": normalize_time_format(t.get("scheduled_end")),
+            "status": api_status,
+            "logged_hours": float(t.get("logged_hours") or 0),
+            "project_subtask_id": t.get("project_subtask_id"),
+        })
+
+    # Soonest/most-recent first (date then start time).
+    result.sort(key=lambda x: ((x["date"] or ""), (x["scheduled_start"] or "")), reverse=True)
+    return result
 
 
 # ---------------------------------------------------------------------------

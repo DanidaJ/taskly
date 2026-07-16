@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { format } from 'date-fns';
 import {
@@ -7,9 +8,12 @@ import {
   Edit2,
   Trash2,
   Check,
+  Circle,
   Pause,
   Play,
   ListChecks,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { PriorityBadge } from '@/components/ui/Badge';
@@ -37,13 +41,16 @@ export default function ProjectCard({
   onDelete,
   onPark,
   onComplete,
+  onOpenDetail,
 }: {
   project: Project;
   onEdit: (p: Project) => void;
   onDelete: (p: Project) => void;
   onPark: (p: Project) => void;
   onComplete: (p: Project) => void;
+  onOpenDetail: (p: Project) => void;
 }) {
+  const [showSubtasks, setShowSubtasks] = useState(false);
   const percent = progressPercent(project);
   const pacing = computePacing(project);
   const perDay = hoursPerDayNeeded(project);
@@ -70,7 +77,13 @@ export default function ProjectCard({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="font-semibold text-gray-900 break-words">{project.name}</h3>
+            <button
+              onClick={() => onOpenDetail(project)}
+              className="text-left font-semibold text-gray-900 break-words hover:text-blue-600 transition-colors"
+              title="View project details"
+            >
+              {project.name}
+            </button>
             <PriorityBadge priority={project.priority} />
             {isParked && (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-gray-200 text-gray-600">
@@ -164,12 +177,41 @@ export default function ProjectCard({
           </span>
         )}
         {totalSubtasks > 0 && (
-          <span className="inline-flex items-center gap-1">
+          <button
+            onClick={() => setShowSubtasks((v) => !v)}
+            className="inline-flex items-center gap-1 hover:text-gray-900 transition-colors"
+            title={showSubtasks ? 'Hide subtasks' : 'Show subtasks'}
+          >
             <ListChecks className="w-3.5 h-3.5" />
             {doneSubtasks}/{totalSubtasks} subtasks
-          </span>
+            {showSubtasks ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          </button>
         )}
       </div>
+
+      {/* Subtask list (done / pending) */}
+      {totalSubtasks > 0 && showSubtasks && (
+        <ul className="mt-3 space-y-1.5 border-t border-gray-100 pt-3">
+          {project.subtasks.map((s) => {
+            const done = s.status === 'completed';
+            return (
+              <li key={s.id} className="flex items-center gap-2 text-sm">
+                {done ? (
+                  <Check className="w-4 h-4 text-green-500 shrink-0" />
+                ) : (
+                  <Circle className="w-4 h-4 text-gray-300 shrink-0" />
+                )}
+                <span className={clsx('truncate', done ? 'text-gray-400 line-through' : 'text-gray-700')}>
+                  {s.name}
+                </span>
+                {s.status === 'in_progress' && (
+                  <span className="text-[10px] font-medium text-amber-600 shrink-0">in progress</span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </motion.div>
   );
 }

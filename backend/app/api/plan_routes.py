@@ -186,6 +186,83 @@ def normalize_time_format(time_value) -> str | None:
     return str(time_value)
 
 
+def _to_hhmm(value) -> str | None:
+    """Coerce a scheduled/actual time value (TIME string, time object, or ISO
+    timestamp) down to 'HH:MM'."""
+    if value is None:
+        return None
+    s = str(value)
+    if 'T' in s:  # ISO timestamp -> keep the time part
+        s = s.split('T', 1)[1]
+    return normalize_time_format(s)
+
+
+def _task_window_hours(task: dict) -> float:
+    """Hours a completed task contributes to its project: actual window if
+    recorded, else the scheduled window. Handles cross-midnight blocks."""
+    start = _to_hhmm(task.get('actual_start') or task.get('scheduled_start'))
+    end = _to_hhmm(task.get('actual_end') or task.get('scheduled_end'))
+    if not start or not end:
+        return 0.0
+    try:
+        sh, sm = (int(x) for x in start.split(':')[:2])
+        eh, em = (int(x) for x in end.split(':')[:2])
+    except (ValueError, AttributeError):
+        return 0.0
+    mins = (eh * 60 + em) - (sh * 60 + sm)
+    if mins < 0:
+        mins += 24 * 60  # crossed midnight
+    return round(mins / 60, 2)
+
+
+async def reconcile_project_hours(old: dict, new: dict):
+    """Bring a linked project's completed hours in line with a task's current
+    state. Idempotent — reverses the task's previous contribution and applies
+    its current one — so it correctly covers complete, un-complete,
+    link-after-complete, relink, and unlink. Best-effort: logs, never raises.
+
+    ``logged_hours`` on the task row is the reversible ledger entry: it records
+    exactly what was last applied, targeted at old's project/subtask.
+    """
+    if db is None:
+        return
+    try:
+        old_hours = float(old.get('logged_hours') or 0)
+        old_project = old.get('project_id')
+        old_subtask = old.get('project_subtask_id')
+
+        new_project = new.get('project_id')
+        new_subtask = new.get('project_subtask_id')
+        is_completed = str(new.get('status')) == 'completed'
+        should_hours = _task_window_hours(new) if (is_completed and new_project) else 0.0
+
+        same_target = old_project == new_project and old_subtask == new_subtask
+        if same_target and abs(old_hours - should_hours) < 0.01:
+            return  # already reconciled — nothing to do
+
+        # Reverse the previous contribution (if any)
+        if old_hours > 0 and old_project:
+            await db.log_project_hours(old_project, -old_hours)
+            if old_subtask:
+                await db.update_project_subtask(old_subtask, {"status": "pending"})
+        # Apply the current contribution (if any)
+        if should_hours > 0 and new_project:
+            await db.log_project_hours(new_project, should_hours)
+            if new_subtask:
+                await db.update_project_subtask(new_subtask, {"status": "completed"})
+        # Persist the reversible amount on the task itself
+        await db.update_planned_task(new["id"], {"logged_hours": should_hours})
+        logger.info(
+            "reconcile_project_hours",
+            task_id=new.get("id"),
+            reversed=old_hours,
+            applied=should_hours,
+            project=new_project,
+        )
+    except Exception as e:
+        logger.error("reconcile_project_hours_failed", error=str(e), task_id=new.get("id"))
+
+
 @router.get("/{date}", response_model=DailyPlan)
 async def get_daily_plan(
     date: str,
@@ -235,8 +312,11 @@ async def get_daily_plan(
                 order=t.get("sort_order", 0),
                 actual_start=str(t["actual_start"]) if t.get("actual_start") else None,
                 actual_end=str(t["actual_end"]) if t.get("actual_end") else None,
+                project_id=t.get("project_id"),
+                project_subtask_id=t.get("project_subtask_id"),
+                logged_hours=float(t.get("logged_hours") or 0),
             ))
-        
+
         return DailyPlan(
             id=plan["id"],
             user_id=plan["user_id"],
@@ -314,6 +394,22 @@ async def save_daily_plan(
                 except Exception as e:
                     logger.warning("archive_replaced_tasks_failed", error=str(e))
 
+                # These old tasks are about to be deleted by replace_planned_tasks
+                # (an RPC that bypasses the delete endpoint's reversal), so reverse
+                # any project hours they logged here — otherwise completed linked
+                # work leaves phantom progress after a plan re-save.
+                for t in old_tasks:
+                    lh = float(t.get("logged_hours") or 0)
+                    if lh > 0 and t.get("project_id"):
+                        try:
+                            await db.log_project_hours(t["project_id"], -lh)
+                            if t.get("project_subtask_id"):
+                                await db.update_project_subtask(
+                                    t["project_subtask_id"], {"status": "pending"}
+                                )
+                        except Exception as e:
+                            logger.warning("replace_reverse_hours_failed", error=str(e))
+
             # Old planned tasks are replaced atomically below (see
             # replace_planned_tasks), so we don't delete them separately here.
             plan_data = {
@@ -387,6 +483,9 @@ async def save_daily_plan(
                     "flexibility": "flexible",  # Default value
                     "rationale": task.notes,
                     "sort_order": task.order if task.order else idx,
+                    "project_id": task.project_id,
+                    "project_subtask_id": task.project_subtask_id,
+                    "logged_hours": task.logged_hours or 0,
                     "created_at": now,
                     "updated_at": now,
                 }
@@ -471,6 +570,9 @@ async def save_daily_plan(
                     order=db_task.get("sort_order", 0),
                     actual_start=str(db_task["actual_start"]) if db_task.get("actual_start") else None,
                     actual_end=str(db_task["actual_end"]) if db_task.get("actual_end") else None,
+                    project_id=db_task.get("project_id"),
+                    project_subtask_id=db_task.get("project_subtask_id"),
+                    logged_hours=float(db_task.get("logged_hours") or 0),
                 ))
         
         return DailyPlan(
@@ -577,6 +679,10 @@ async def update_task_status(
                 detail="Task update failed",
             )
 
+        # Keep any linked project's hours in sync with this task's new state
+        # (e.g. pending→completed logs hours, completed→pending reverses them).
+        await reconcile_project_hours(existing_task, updated)
+
         await log_task_history_entry({
             "id": str(uuid.uuid4()),
             "user_id": current_user["user_id"],
@@ -651,6 +757,21 @@ async def delete_planned_task(
                 "created_at": datetime.utcnow().isoformat(),
             })
 
+        # Reverse any hours this task logged to its project before removing it,
+        # so deleting a completed linked task doesn't leave phantom progress.
+        if (
+            existing_task
+            and float(existing_task.get("logged_hours") or 0) > 0
+            and existing_task.get("project_id")
+        ):
+            await db.log_project_hours(
+                existing_task["project_id"], -float(existing_task["logged_hours"])
+            )
+            if existing_task.get("project_subtask_id"):
+                await db.update_project_subtask(
+                    existing_task["project_subtask_id"], {"status": "pending"}
+                )
+
         # Delete the planned task from database
         await db.delete_planned_task(task_id)
         return {"message": "Task deleted", "task_id": task_id}
@@ -659,6 +780,74 @@ async def delete_planned_task(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete task: {str(e)}",
         )
+
+
+@router.post("/{plan_id}/tasks/{task_id}/link")
+async def link_task_to_project(
+    plan_id: str,
+    task_id: str,
+    body: dict,
+    current_user: dict = Depends(validate_supabase_token),
+):
+    """Manually link a planned task to a project (+ optional subtask), or unlink
+    it (send project_id=null). Reconciles hours immediately, so linking an
+    already-completed task logs its hours right away and unlinking reverses them.
+
+    Body: {"project_id": str | null, "project_subtask_id": str | null}
+    """
+    user_id = current_user["user_id"]
+    project_id = body.get("project_id") or None
+    subtask_id = body.get("project_subtask_id") or None
+
+    if db is None:
+        return {"task_id": task_id, "project_id": project_id, "project_subtask_id": subtask_id}
+
+    plan = await db.get_daily_plan_by_id(plan_id, user_id)
+    if not plan:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan not found")
+    existing_task = next(
+        (t for t in plan.get("planned_tasks", []) if t.get("id") == task_id), None
+    )
+    if not existing_task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Task not found in this plan"
+        )
+
+    if project_id:
+        project = await db.get_project(project_id)
+        if not project or project.get("user_id") != user_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        if subtask_id:
+            sub = await db.get_project_subtask(subtask_id)
+            if not sub or sub.get("project_id") != project_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Subtask does not belong to that project",
+                )
+    else:
+        subtask_id = None  # no subtask without a project
+
+    updated = await db.update_planned_task(
+        task_id,
+        {
+            "project_id": project_id,
+            "project_subtask_id": subtask_id,
+            "updated_at": datetime.utcnow().isoformat(),
+        },
+    )
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Link update failed"
+        )
+
+    # Log/reverse immediately for the link-after-complete and unlink cases.
+    await reconcile_project_hours(existing_task, updated)
+
+    return {
+        "task_id": task_id,
+        "project_id": project_id,
+        "project_subtask_id": subtask_id,
+    }
 
 
 @router.post("/{plan_id}/tasks/{task_id}/reschedule")
@@ -1016,8 +1205,11 @@ async def get_daily_plans_range(
                     order=t.get("sort_order", 0),
                     actual_start=str(t["actual_start"]) if t.get("actual_start") else None,
                     actual_end=str(t["actual_end"]) if t.get("actual_end") else None,
+                    project_id=t.get("project_id"),
+                    project_subtask_id=t.get("project_subtask_id"),
+                    logged_hours=float(t.get("logged_hours") or 0),
                 ))
-            
+
             result.append(DailyPlan(
                 id=plan["id"],
                 user_id=plan["user_id"],

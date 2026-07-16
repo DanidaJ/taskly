@@ -87,6 +87,11 @@ class PlannedTaskBase(BaseModel):
     order: int = 0
     is_break: bool = False  # Auto-generated break tasks
     depends_on: Optional[List[str]] = None  # Task IDs that must complete first
+    # Manual project link. When set, completing this task logs its hours to the
+    # project (and optional subtask); logged_hours records the reversible amount.
+    project_id: Optional[str] = None
+    project_subtask_id: Optional[str] = None
+    logged_hours: float = 0
 
 
 class PlannedTaskCreate(PlannedTaskBase):

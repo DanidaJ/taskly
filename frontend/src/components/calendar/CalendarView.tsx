@@ -17,6 +17,7 @@ import {
   Calendar,
   LayoutGrid,
   List,
+  Link2,
 } from 'lucide-react';
 import { PlannedTask, Task, Commitment, DailyPlan } from '@/types';
 import { Button } from '@/components/ui';
@@ -611,8 +612,11 @@ function WeekView({
                     }}
                     onClick={() => onEventClick?.(event)}
                   >
-                    <div className="text-xs font-medium text-white truncate">
-                      {getEventPrefix(event)}{event.title}
+                    <div className="flex items-center gap-1 text-xs font-medium text-white">
+                      {event.plannedTask?.project_id && (
+                        <Link2 className="w-3 h-3 shrink-0" aria-label="Linked to a project" />
+                      )}
+                      <span className="truncate">{getEventPrefix(event)}{event.title}</span>
                     </div>
                     <div className="text-[10px] text-white/70 truncate">
                       {event.startTime}-{event.endTime}
@@ -728,8 +732,11 @@ function DayView({
                 }}
                 onClick={() => onEventClick?.(event)}
               >
-                <div className="text-sm font-semibold text-white truncate">
-                  {getEventPrefix(event)}{event.title}
+                <div className="flex items-center gap-1 text-sm font-semibold text-white">
+                  {event.plannedTask?.project_id && (
+                    <Link2 className="w-3.5 h-3.5 shrink-0" aria-label="Linked to a project" />
+                  )}
+                  <span className="truncate">{getEventPrefix(event)}{event.title}</span>
                 </div>
                 <div className="text-xs text-white/80 mt-0.5">
                   {(() => {

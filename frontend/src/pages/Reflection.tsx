@@ -37,11 +37,19 @@ export default function Reflection() {
   const [todayFocusMinutes, setTodayFocusMinutes] = useState(0);
   const [lastNightSleep, setLastNightSleep] = useState<{ duration: number; quality: number } | null>(null);
 
-  const { plannedTasks } = useTaskStore();
-  const { addDailyLog, recentLogs } = useUserProfileStore();
+  const { plansByDate, loadPlanFromDatabase } = useTaskStore();
+  const { addDailyLog } = useUserProfileStore();
   const { user } = useAuthStore();
 
   const today = format(new Date(), 'yyyy-MM-dd');
+
+  // Ensure TODAY's plan is loaded. The shared store's flat `plannedTasks` list
+  // can hold a whole date range (the calendar loads a week), so we read today's
+  // tasks from plansByDate[today] instead — otherwise the summary counts past
+  // days and only looks right after a reload clears the range.
+  useEffect(() => {
+    loadPlanFromDatabase(today);
+  }, [today, loadPlanFromDatabase]);
 
   // Load today's data for context (backend only)
   useEffect(() => {
@@ -72,8 +80,9 @@ export default function Reflection() {
       });
   }, [today]);
 
-  const completedTasks = plannedTasks.filter((t) => t.status === 'completed');
-  const skippedTasks = plannedTasks.filter(
+  const todaysTasks = plansByDate[today]?.tasks ?? [];
+  const completedTasks = todaysTasks.filter((t) => t.status === 'completed');
+  const skippedTasks = todaysTasks.filter(
     (t) => t.status === 'skipped' || t.status === 'cancelled'
   );
 
@@ -87,36 +96,35 @@ export default function Reflection() {
         focusLevel
       );
 
-      // Build reflection from API response or generate based on actual data
+      // The reflection endpoint returns { prompts, suggestions } only; the
+      // what-worked / feedback lines are derived locally from today's actual data.
       const reflection: DailyReflection = {
-        what_worked: response?.what_worked || (
-          completedTasks.length > 0 
+        what_worked:
+          completedTasks.length > 0
             ? [`Completed ${completedTasks.length} task${completedTasks.length > 1 ? 's' : ''}: ${completedTasks.slice(0, 3).map(t => t.task_name).join(', ')}`]
-            : ['No tasks completed yet - tomorrow is a fresh start!']
-        ),
-        what_didnt_work: response?.what_didnt_work || (
+            : ['No tasks completed yet - tomorrow is a fresh start!'],
+        what_didnt_work:
           skippedTasks.length > 0
             ? [`${skippedTasks.length} task${skippedTasks.length > 1 ? 's were' : ' was'} skipped: ${skippedTasks.slice(0, 2).map(t => t.task_name).join(', ')}`]
-            : []
-        ),
-        energy_feedback: response?.energy_feedback || (
+            : [],
+        energy_feedback:
           energyLevel >= 4
             ? 'Great energy management today!'
-            : energyLevel <= 2 
+            : energyLevel <= 2
               ? 'Low energy today. Consider more sleep or breaks tomorrow.'
-              : 'Moderate energy. Try aligning demanding tasks with your peak hours.'
-        ),
-        focus_feedback: response?.focus_feedback || (
+              : 'Moderate energy. Try aligning demanding tasks with your peak hours.',
+        focus_feedback:
           focusLevel >= 4
             ? `Excellent focus! You logged ${todayFocusMinutes} minutes of focused work.`
             : focusLevel <= 2
               ? 'Focus was challenging today. Try the Focus Timer for structured sessions.'
-              : 'Decent focus. Consider blocking distractions during deep work.'
-        ),
-        suggestions: response?.suggestions || [
-          completedTasks.length < 3 ? 'Start with your most important task tomorrow' : 'Keep up the great momentum!',
-          energyLevel <= 3 ? 'Try going to bed 30 minutes earlier' : 'Your energy patterns are working well',
-        ].filter(Boolean),
+              : 'Decent focus. Consider blocking distractions during deep work.',
+        suggestions: response?.suggestions?.length
+          ? response.suggestions
+          : [
+              completedTasks.length < 3 ? 'Start with your most important task tomorrow' : 'Keep up the great momentum!',
+              energyLevel <= 3 ? 'Try going to bed 30 minutes earlier' : 'Your energy patterns are working well',
+            ].filter(Boolean),
       };
 
       setAiReflection(reflection);
@@ -176,6 +184,13 @@ export default function Reflection() {
 
   const EnergyIcon = getLevelIcon(energyLevel);
   const FocusIcon = getLevelIcon(focusLevel);
+
+  // Sleep duration is stored in minutes. Round to whole hours turned 5h30m into
+  // "6h"; show one decimal so a half-hour reads honestly (e.g. "5.5h").
+  const formatSleepHours = (minutes: number) => {
+    const h = minutes / 60;
+    return Number.isInteger(h) ? `${h}h` : `${h.toFixed(1)}h`;
+  };
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
@@ -239,7 +254,7 @@ export default function Reflection() {
             <Moon className="w-6 h-6 text-indigo-600" />
             <div>
               <p className="text-2xl font-bold text-indigo-600">
-                {lastNightSleep ? `${Math.round(lastNightSleep.duration / 60)}h` : '—'}
+                {lastNightSleep ? formatSleepHours(lastNightSleep.duration) : '—'}
               </p>
               <p className="text-sm text-gray-600">Last Sleep</p>
             </div>

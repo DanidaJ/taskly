@@ -8,6 +8,7 @@ import type { Project } from '@/services/api';
 import AddProjectForm from './AddProjectForm';
 import ProjectCard from './ProjectCard';
 import ProjectEditModal from './ProjectEditModal';
+import ProjectDetailModal from './ProjectDetailModal';
 
 const STATUS_RANK: Record<string, number> = { active: 0, parked: 1, completed: 2, archived: 3 };
 const PRIORITY_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
@@ -25,6 +26,9 @@ export default function ProjectsPanel() {
 
   const [editing, setEditing] = useState<Project | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Project | null>(null);
+  // Track by id so the open detail modal stays in sync with live project data.
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const detailProject = detailId ? projects.find((p) => p.id === detailId) ?? null : null;
 
   useEffect(() => {
     if (!hasLoaded) loadProjects();
@@ -86,6 +90,7 @@ export default function ProjectsPanel() {
                       await completeProject(p.id);
                       toast.success('Project marked complete');
                     }}
+                    onOpenDetail={(p) => setDetailId(p.id)}
                   />
                 ))}
               </AnimatePresence>
@@ -95,6 +100,10 @@ export default function ProjectsPanel() {
       </div>
 
       {editing && <ProjectEditModal project={editing} onClose={() => setEditing(null)} />}
+
+      {detailProject && (
+        <ProjectDetailModal project={detailProject} onClose={() => setDetailId(null)} />
+      )}
 
       {confirmDelete && (
         <Modal isOpen onClose={() => setConfirmDelete(null)} title="Delete this project?">

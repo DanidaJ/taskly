@@ -47,6 +47,11 @@ export interface PlannedTask {
   // Start-timing context (written once on first start, never overwritten)
   start_type?: TaskStartType;
   minutes_offset?: number; // negative = started early, positive = started late
+  // Manual project link. Completing a linked task logs its hours to the project
+  // (and optional subtask); logged_hours is the reversible amount already applied.
+  project_id?: string | null;
+  project_subtask_id?: string | null;
+  logged_hours?: number;
 }
 
 // Daily plan

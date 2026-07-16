@@ -21,7 +21,7 @@ import {
   CalendarPlus,
   RefreshCw,
 } from 'lucide-react';
-import { useTaskStore, useUserProfileStore, useFocusCountdownStore } from '@/stores';
+import { useTaskStore, useUserProfileStore, useFocusCountdownStore, useProjectStore } from '@/stores';
 import { PlannedTask } from '@/types';
 import { activeFocusTimerService, focusSessionService } from '@/services/api';
 import { Button, Input, Modal, Textarea } from '@/components/ui';
@@ -78,8 +78,9 @@ export default function Schedule() {
   const [taskToConfirmStart, setTaskToConfirmStart] = useState<PlannedTask | null>(null);
   const [customRescheduleOpen, setCustomRescheduleOpen] = useState(false);
 
-  const { plannedTasks, updatePlannedTask, deletePlannedTask, tasks, loadPlanFromDatabase, loadPlansForDateRange, plansByDate, getMissedTasks, rescheduleTask } = useTaskStore();
+  const { plannedTasks, updatePlannedTask, deletePlannedTask, linkTaskToProject, tasks, loadPlanFromDatabase, loadPlansForDateRange, plansByDate, getMissedTasks, rescheduleTask } = useTaskStore();
   const { commitments } = useUserProfileStore();
+  const { projects, loadProjects } = useProjectStore();
   const clearSharedCountdown = useFocusCountdownStore((s) => s.clearSnapshot);
   const [rescheduleLoading, setRescheduleLoading] = useState<string | null>(null);
   const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
@@ -87,6 +88,28 @@ export default function Schedule() {
 
   // Missed-task enforcement runs globally in Layout, so we just read the list here.
   const missedTasks = getMissedTasks();
+
+  // Load projects so a task can be linked to one from its detail popup.
+  useEffect(() => {
+    loadProjects();
+  }, [loadProjects]);
+
+  // Link (or unlink) the open task to a project/subtask, keeping the popup's
+  // local copy in sync so the dropdowns reflect the choice immediately.
+  const handleLinkProject = async (projectId: string | null, subtaskId: string | null) => {
+    if (!selectedTask) return;
+    try {
+      await linkTaskToProject(selectedTask.id, projectId, subtaskId);
+      setSelectedTask({
+        ...selectedTask,
+        project_id: projectId,
+        project_subtask_id: projectId ? subtaskId : null,
+      });
+      toast.success(projectId ? 'Linked to project' : 'Unlinked from project');
+    } catch {
+      toast.error('Could not update project link');
+    }
+  };
 
   const handleReschedule = useCallback(async (taskId: string, mode: 'next_slot' | 'tomorrow' | 'skip') => {
     setRescheduleLoading(taskId);
@@ -370,6 +393,12 @@ export default function Schedule() {
   const selectedTaskTimerBadge = selectedTask ? getTaskTimerBadge(selectedTask) : null;
   const selectedTaskTimerReason = selectedTask ? getTaskTimerReason(selectedTask) : null;
   const selectedTaskUserNotes = selectedTask ? getTaskUserNotes(selectedTask) : null;
+  const linkedProject = selectedTask?.project_id
+    ? projects.find((p) => p.id === selectedTask.project_id)
+    : undefined;
+  const linkableProjects = projects.filter(
+    (p) => p.status !== 'completed' || p.id === selectedTask?.project_id,
+  );
   const selectedTaskLifecycle = selectedTask
     ? getTaskLifecycleTimeline(selectedTask, { includeDateTime: true })
     : null;
@@ -1024,6 +1053,47 @@ export default function Schedule() {
               <div className="flex items-center justify-between gap-3">
                 <span className="text-sm font-medium text-gray-600">Duration:</span>
                 <p className="text-sm font-medium text-gray-900">{selectedTask.suggested_duration}</p>
+              </div>
+
+              {/* Project link — completing a linked task logs its hours to the project */}
+              <div className="flex items-start justify-between gap-3">
+                <span className="text-sm font-medium text-gray-600 pt-1.5">Project:</span>
+                <div className="w-[70%] space-y-2">
+                  <select
+                    value={selectedTask.project_id || ''}
+                    onChange={(e) => handleLinkProject(e.target.value || null, null)}
+                    className="w-full text-sm rounded-apple border border-gray-200 bg-white px-2 py-1.5 text-gray-900 focus:border-blue-400 focus:outline-none"
+                  >
+                    <option value="">Not linked</option>
+                    {linkableProjects.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+
+                  {linkedProject && linkedProject.subtasks.length > 0 && (
+                    <select
+                      value={selectedTask.project_subtask_id || ''}
+                      onChange={(e) => handleLinkProject(selectedTask.project_id!, e.target.value || null)}
+                      className="w-full text-sm rounded-apple border border-gray-200 bg-white px-2 py-1.5 text-gray-700 focus:border-blue-400 focus:outline-none"
+                    >
+                      <option value="">Whole project (no subtask)</option>
+                      {linkedProject.subtasks.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}{s.status === 'completed' ? ' ✓' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
+                  {selectedTask.project_id && (
+                    <p className="text-xs text-gray-500">
+                      Its time is added to the project when you mark this task complete.
+                    </p>
+                  )}
+                  {linkableProjects.length === 0 && (
+                    <p className="text-xs text-gray-400">No active projects yet.</p>
+                  )}
+                </div>
               </div>
 
               {/* Lifecycle Timeline */}

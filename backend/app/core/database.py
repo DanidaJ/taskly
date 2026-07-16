@@ -409,12 +409,17 @@ class SupabaseDB:
         return response.data
 
     async def log_project_hours(self, project_id: str, hours: float):
-        """Add completed work hours to a project (read-modify-write)."""
+        """Add completed work hours to a project (read-modify-write).
+
+        ``hours`` may be negative to reverse a previously-logged contribution
+        (un-complete / delete / unlink). Clamped at 0 so a reversal can never
+        push a project's completed hours below zero.
+        """
         project = await self.get_project(project_id)
         if not project:
             return None
-        new_total = float(project.get('hours_completed') or 0) + float(hours)
-        return await self.update_project(project_id, {'hours_completed': new_total})
+        new_total = max(0.0, float(project.get('hours_completed') or 0) + float(hours))
+        return await self.update_project(project_id, {'hours_completed': round(new_total, 2)})
 
     # Project Subtasks
 
@@ -430,6 +435,18 @@ class SupabaseDB:
         updates['updated_at'] = _utc_now_iso()
         response = self.client.table('project_subtasks').update(updates).eq('id', subtask_id).execute()
         return response.data[0] if response.data else None
+
+    async def get_project_tasks(self, project_id: str, user_id: str):
+        """Planned tasks linked to a project, each with its plan date attached
+        (joined via daily_plans) and scoped to the owning user."""
+        response = (
+            self.client.table('planned_tasks')
+            .select('*, daily_plans!inner(date, user_id)')
+            .eq('project_id', project_id)
+            .eq('daily_plans.user_id', user_id)
+            .execute()
+        )
+        return response.data or []
 
     async def delete_project_subtask(self, subtask_id: str):
         response = self.client.table('project_subtasks').delete().eq('id', subtask_id).execute()

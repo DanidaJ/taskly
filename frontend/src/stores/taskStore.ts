@@ -1,70 +1,13 @@
 import { create } from 'zustand';
 import { Task, PlannedTask, DailyPlan, AIPlanResponse } from '@/types';
 import { format } from 'date-fns';
-import { planService, dailyStatsService, recurringTaskService, projectService } from '@/services/api';
+import { planService, dailyStatsService, recurringTaskService } from '@/services/api';
 import { useProjectStore } from './projectStore';
 
-// Convert a completed task's time window into hours. Prefers actual times
-// (early start / early finish are already captured there), falls back to the
-// scheduled window. Handles cross-midnight blocks.
-function computeTaskHours(task: PlannedTask, updates: Partial<PlannedTask>): number {
-  const start = updates.actual_start || task.actual_start || task.scheduled_start;
-  const end = updates.actual_end || task.actual_end || task.scheduled_end;
-  if (!start || !end) return 0;
-  const [sh, sm] = start.split(':').map(Number);
-  const [eh, em] = end.split(':').map(Number);
-  if ([sh, sm, eh, em].some((n) => Number.isNaN(n))) return 0;
-  let mins = eh * 60 + em - (sh * 60 + sm);
-  if (mins < 0) mins += 24 * 60; // crossed midnight
-  return Math.round((mins / 60) * 100) / 100;
-}
-
-// When a project-linked task is completed, log its hours to the matching
-// project (and complete the matching subtask). Matching is by exact name —
-// the AI is instructed to name project blocks after the project/subtask.
-async function logCompletedTaskToProject(task: PlannedTask, updates: Partial<PlannedTask>) {
-  try {
-    const hours = computeTaskHours(task, updates);
-    if (hours <= 0) return;
-
-    const projectStore = useProjectStore.getState();
-    if (!projectStore.hasLoaded) {
-      await projectStore.loadProjects();
-    }
-    const projects = useProjectStore.getState().projects;
-    const name = task.task_name.toLowerCase().trim();
-
-    const applyUpdated = (updated: { id: string }) =>
-      useProjectStore.setState((s) => ({
-        projects: s.projects.map((p) => (p.id === updated.id ? (updated as any) : p)),
-      }));
-
-    // Subtask match takes precedence
-    for (const project of projects) {
-      if (project.status === 'completed') continue;
-      const sub = project.subtasks.find(
-        (s) => s.name.toLowerCase().trim() === name && s.status !== 'completed'
-      );
-      if (sub) {
-        await projectService.updateSubtask(project.id, sub.id, { status: 'completed' });
-        const updated = await projectService.logHours(project.id, hours);
-        applyUpdated(updated);
-        return;
-      }
-    }
-
-    // Otherwise match the project name directly
-    for (const project of projects) {
-      if (project.status === 'completed') continue;
-      if (project.name.toLowerCase().trim() === name) {
-        const updated = await projectService.logHours(project.id, hours);
-        applyUpdated(updated);
-        return;
-      }
-    }
-  } catch (error) {
-    console.error('Failed to log project hours from completed task:', error);
-  }
+// Pull the latest projects so a project's progress bar / subtask states reflect
+// hours the backend just logged or reversed for a linked task. Fire-and-forget.
+function refreshProjects() {
+  void useProjectStore.getState().loadProjects();
 }
 
 // Helper to track daily task stats for analytics
@@ -103,6 +46,7 @@ interface TaskStore {
   setCurrentPlan: (plan: DailyPlan | null) => void;
   setPlannedTasks: (tasks: PlannedTask[]) => void;
   updatePlannedTask: (id: string, updates: Partial<PlannedTask>) => Promise<void>;
+  linkTaskToProject: (taskId: string, projectId: string | null, subtaskId: string | null) => Promise<void>;
   deletePlannedTask: (id: string) => Promise<void>;
   reorderPlannedTasks: (tasks: PlannedTask[]) => void;
 
@@ -238,11 +182,58 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     const statsTasks = updatedPlansByDate[taskDate]?.tasks || [];
     syncDailyTaskStats(taskDate, statsTasks);
 
-    // On the pending→completed transition, log the task's hours to a matching
-    // project (fire-and-forget; never block the task update on it).
-    if (existingTask && existingTask.status !== 'completed' && updates.status === 'completed') {
-      void logCompletedTaskToProject(existingTask, updates);
+    // A completion/un-completion of a project-linked task makes the backend
+    // log or reverse its hours; refresh projects so the bar/subtasks update.
+    const statusChanged = updates.status && existingTask && updates.status !== existingTask.status;
+    if (statusChanged && existingTask?.project_id) {
+      refreshProjects();
     }
+  },
+
+  linkTaskToProject: async (taskId, projectId, subtaskId) => {
+    const state = get();
+
+    // Locate the plan that owns this task
+    let planId: string | undefined;
+    let taskDate: string | undefined;
+    for (const [dateStr, plan] of Object.entries(state.plansByDate)) {
+      if (plan.tasks?.some((t) => t.id === taskId)) {
+        planId = plan.id;
+        taskDate = dateStr;
+        break;
+      }
+    }
+    if (!planId && state.currentPlan?.tasks?.some((t) => t.id === taskId)) {
+      planId = state.currentPlan.id;
+      taskDate = state.currentPlan.date;
+    }
+    if (!planId) throw new Error('No plan found for this task');
+
+    await planService.linkTask(planId, taskId, projectId, subtaskId);
+
+    // Reflect the link locally (subtask only makes sense with a project)
+    const patch: Partial<PlannedTask> = {
+      project_id: projectId,
+      project_subtask_id: projectId ? subtaskId : null,
+    };
+    const applyPatch = (t: PlannedTask) => (t.id === taskId ? { ...t, ...patch } : t);
+    set((s) => {
+      const plansByDate = { ...s.plansByDate };
+      if (taskDate && plansByDate[taskDate]?.tasks) {
+        plansByDate[taskDate] = {
+          ...plansByDate[taskDate],
+          tasks: plansByDate[taskDate].tasks.map(applyPatch),
+        };
+      }
+      const currentPlan = s.currentPlan
+        ? { ...s.currentPlan, tasks: s.currentPlan.tasks.map(applyPatch) }
+        : s.currentPlan;
+      return { plansByDate, currentPlan, plannedTasks: s.plannedTasks.map(applyPatch) };
+    });
+
+    // Linking an already-completed task logs its hours immediately (and
+    // unlinking reverses), so refresh projects to reflect it.
+    refreshProjects();
   },
 
   deletePlannedTask: async (id) => {
@@ -251,12 +242,15 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     // Find which plan contains this task
     let planId: string | undefined;
     let taskDate: string | undefined;
+    let deletedWasLinked = false;
 
     // First check plansByDate
     for (const [dateStr, plan] of Object.entries(state.plansByDate)) {
-      if (plan.tasks?.some(task => task.id === id)) {
+      const found = plan.tasks?.find(task => task.id === id);
+      if (found) {
         planId = plan.id;
         taskDate = dateStr;
+        deletedWasLinked = !!found.project_id;
         break;
       }
     }
@@ -296,6 +290,9 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
         syncDailyTaskStats(taskDate, statsTasks);
       }
       set({ plannedTasks: newPlannedTasks });
+
+      // Deleting a linked task reverses its logged hours on the backend.
+      if (deletedWasLinked) refreshProjects();
     } catch (error) {
       console.error('Failed to delete task:', error);
       throw error;

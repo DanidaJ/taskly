@@ -177,6 +177,21 @@ export const planService = {
     return this.updateTask(planId, taskId, { status });
   },
 
+  // Manually link a planned task to a project (+ optional subtask), or unlink
+  // it by passing projectId=null. The backend logs/reverses hours immediately.
+  async linkTask(
+    planId: string,
+    taskId: string,
+    projectId: string | null,
+    subtaskId: string | null,
+  ) {
+    const response = await api.post(`/plans/${planId}/tasks/${taskId}/link`, {
+      project_id: projectId,
+      project_subtask_id: subtaskId,
+    });
+    return response.data;
+  },
+
   async deleteTask(planId: string, taskId: string) {
     await api.delete(`/plans/${planId}/tasks/${taskId}`);
   },
@@ -714,6 +729,18 @@ export interface ProjectEstimate {
   size: ProjectSize;
 }
 
+// A planned task linked to a project (a scheduled session advancing it).
+export interface ProjectTask {
+  id: string;
+  name: string;
+  date: string | null;             // YYYY-MM-DD
+  scheduled_start: string | null;  // HH:MM
+  scheduled_end: string | null;    // HH:MM
+  status: string;                  // pending | in_progress | completed | missed | skipped | cancelled
+  logged_hours: number;
+  project_subtask_id: string | null;
+}
+
 export const projectService = {
   async list(): Promise<Project[]> {
     const response = await api.get('/projects');
@@ -751,6 +778,11 @@ export const projectService = {
 
   async logHours(id: string, hours: number): Promise<Project> {
     const response = await api.post(`/projects/${id}/log-hours`, { hours });
+    return response.data;
+  },
+
+  async getTasks(id: string): Promise<ProjectTask[]> {
+    const response = await api.get(`/projects/${id}/tasks`);
     return response.data;
   },
 
