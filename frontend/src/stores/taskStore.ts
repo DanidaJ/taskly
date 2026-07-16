@@ -304,6 +304,12 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
   }),
 
   applyAIPlan: async (response, targetDate) => {
+    // Defensive: never save an empty plan (AI outage). Saving would re-write the
+    // day's existing tasks for no benefit. PlannerChat also guards this upstream.
+    if (!response.plan || response.plan.length === 0) {
+      console.warn('applyAIPlan called with an empty plan — skipping save.');
+      return;
+    }
     const state = get();
     const planDate = targetDate || format(new Date(), 'yyyy-MM-dd');
 

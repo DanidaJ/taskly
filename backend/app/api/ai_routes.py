@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from app.core.security import get_optional_user
+from app.core.security import validate_supabase_token
 from app.core.rate_limit import limiter
 from app.services import ai_service
 from app.api.plan_routes import get_user_timezone
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/ai", tags=["AI Planning"])
 async def generate_plan(
     request: Request,
     payload: AIPlanRequest,
-    current_user: dict | None = Depends(get_optional_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """
     Generate an AI-powered plan from raw task input.
@@ -32,9 +32,8 @@ async def generate_plan(
     - Provide recommendations for productivity
     """
     try:
-        # Anchor "now"/"today" to the user's timezone (falls back to UTC when
-        # the request is unauthenticated).
-        user_tz = await get_user_timezone(current_user["user_id"]) if current_user else "UTC"
+        # Anchor "now"/"today" to the requesting user's timezone.
+        user_tz = await get_user_timezone(current_user["user_id"])
         return await ai_service.generate_plan(payload, user_tz)
     except Exception as e:
         raise HTTPException(
@@ -48,7 +47,7 @@ async def generate_plan(
 async def update_plan(
     request: Request,
     payload: AIPlanUpdateRequest,
-    current_user: dict | None = Depends(get_optional_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """
     Update an existing plan based on user modifications.
@@ -67,7 +66,7 @@ async def update_plan(
 async def get_reflection(
     request: Request,
     payload: AIReflectionRequest,
-    current_user: dict | None = Depends(get_optional_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """
     Generate end-of-day reflection prompts and suggestions.
@@ -86,7 +85,7 @@ async def get_reflection(
 async def classify_task(
     request: Request,
     payload: AIClassifyRequest,
-    current_user: dict | None = Depends(get_optional_user),
+    current_user: dict = Depends(validate_supabase_token),
 ):
     """
     Classify a single task based on its description.

@@ -95,7 +95,9 @@ class PlannedTaskBase(BaseModel):
 
 
 class PlannedTaskCreate(PlannedTaskBase):
-    pass
+    # Existing task's DB id. Reused on save when it's a valid UUID so ids stay
+    # stable across re-saves; frontend drafts (e.g. "planned-…") mint a new one.
+    id: Optional[str] = None
 
 
 class PlannedTaskUpdate(BaseModel):

@@ -363,10 +363,12 @@ async def save_daily_plan(
         
         # Check if a plan already exists for this date
         existing_plan = await db.get_daily_plan(user_id, plan.date)
-        
+        # Old tasks are captured here (before the atomic replace deletes them) so
+        # project hours can be reconciled AFTER the replace succeeds.
+        old_tasks = existing_plan.get("planned_tasks", []) if existing_plan else []
+
         if existing_plan:
             plan_id = existing_plan["id"]
-            old_tasks = existing_plan.get("planned_tasks", [])
 
             if old_tasks:
                 history_entries = []
@@ -394,22 +396,6 @@ async def save_daily_plan(
                 except Exception as e:
                     logger.warning("archive_replaced_tasks_failed", error=str(e))
 
-                # These old tasks are about to be deleted by replace_planned_tasks
-                # (an RPC that bypasses the delete endpoint's reversal), so reverse
-                # any project hours they logged here — otherwise completed linked
-                # work leaves phantom progress after a plan re-save.
-                for t in old_tasks:
-                    lh = float(t.get("logged_hours") or 0)
-                    if lh > 0 and t.get("project_id"):
-                        try:
-                            await db.log_project_hours(t["project_id"], -lh)
-                            if t.get("project_subtask_id"):
-                                await db.update_project_subtask(
-                                    t["project_subtask_id"], {"status": "pending"}
-                                )
-                        except Exception as e:
-                            logger.warning("replace_reverse_hours_failed", error=str(e))
-
             # Old planned tasks are replaced atomically below (see
             # replace_planned_tasks), so we don't delete them separately here.
             plan_data = {
@@ -435,6 +421,9 @@ async def save_daily_plan(
         # Save planned tasks
         saved_tasks = []
         tasks_to_save = []
+        # Look up surviving tasks by id so we can carry their real logged_hours
+        # through the replace (never trust the client's echoed value).
+        old_by_id = {ot.get("id"): ot for ot in old_tasks}
         if plan.tasks:
             for idx, task in enumerate(plan.tasks):
                 # Get the API values as strings
@@ -469,8 +458,24 @@ async def save_daily_plan(
                     if parsed_minutes > 0:
                         estimated_minutes = parsed_minutes
                 
+                # Reuse the client id when it's a real DB UUID so ids stay stable
+                # across re-saves (reminders, focus timer, task history all key on
+                # task id). Frontend drafts use non-UUID ids → mint a fresh one.
+                task_uuid = str(uuid.uuid4())
+                raw_id = getattr(task, "id", None)
+                if raw_id:
+                    try:
+                        uuid.UUID(str(raw_id))
+                        task_uuid = str(raw_id)
+                    except (ValueError, AttributeError, TypeError):
+                        pass
+
+                # Carry a surviving task's real logged_hours from the DB; new tasks
+                # start at 0 and are credited below only if completed + linked.
+                carried_logged = float((old_by_id.get(task_uuid) or {}).get("logged_hours") or 0)
+
                 task_data = {
-                    "id": str(uuid.uuid4()),
+                    "id": task_uuid,
                     "plan_id": plan_id,
                     "task_id": task_id_value,
                     "name": task.task_name,
@@ -485,7 +490,7 @@ async def save_daily_plan(
                     "sort_order": task.order if task.order else idx,
                     "project_id": task.project_id,
                     "project_subtask_id": task.project_subtask_id,
-                    "logged_hours": task.logged_hours or 0,
+                    "logged_hours": carried_logged,
                     "created_at": now,
                     "updated_at": now,
                 }
@@ -553,6 +558,32 @@ async def save_daily_plan(
         # transaction). Always called — including with an empty list — so that
         # saving an emptied plan clears its tasks without a non-atomic delete.
         saved_tasks_data = await db.replace_planned_tasks(plan_id, tasks_to_save)
+
+        # Reconcile project hours AFTER the atomic replace succeeds (so a failed
+        # replace never mutates project totals). Surviving tasks kept their real
+        # logged_hours (carried above), so we only:
+        #   - reverse the contribution of tasks that were REMOVED in this save, and
+        #   - credit tasks that are newly present AND completed + linked.
+        try:
+            new_ids = {row.get("id") for row in (saved_tasks_data or [])}
+            old_ids = set(old_by_id.keys())
+            for ot in old_tasks:
+                if ot.get("id") in new_ids:
+                    continue  # survived — its hours were carried through untouched
+                lh = float(ot.get("logged_hours") or 0)
+                if lh > 0 and ot.get("project_id"):
+                    await db.log_project_hours(ot["project_id"], -lh)
+                    if ot.get("project_subtask_id"):
+                        await db.update_project_subtask(ot["project_subtask_id"], {"status": "pending"})
+            for row in (saved_tasks_data or []):
+                if (
+                    row.get("id") not in old_ids
+                    and row.get("project_id")
+                    and str(row.get("status")) == "completed"
+                ):
+                    await reconcile_project_hours({"logged_hours": 0}, row)
+        except Exception as e:
+            logger.warning("resave_project_hours_reconcile_failed", error=str(e))
 
         # Transform saved tasks to PlannedTask response format
         if saved_tasks_data:

@@ -614,10 +614,9 @@ class AIService:
             result = response.choices[0].message.content
             logger.info("Mistral chat response", response_preview=result[:200] if result else "empty")
             return result
-        except Exception as e:
-            # Prevent tenacity RetryError bubbles; return safe fallback JSON
-            logger.error("Mistral call failed, returning fallback response", error=str(e), error_type=type(e).__name__)
-            return '{"tasks": [], "plan": [], "recommendations": ["AI temporarily unavailable"]}'
+        # NOTE: do NOT catch-and-return a fallback here. Letting the exception
+        # propagate is what makes the @retry decorator actually retry Mistral;
+        # swallowing it made retry dead code. Callers handle the final failure.
     
     def _parse_json_response(self, response: str) -> dict:
         """Parse JSON from AI response, handling potential formatting issues"""
@@ -727,8 +726,17 @@ class AIService:
             return result
         except Exception as e:
             logger.error("Error generating plan", error=str(e), error_type=type(e).__name__)
-            # Return a fallback response
-            return self._generate_fallback_plan(request.raw_tasks_input)
+            # The AI genuinely failed (after retries) or returned unusable output.
+            # Return an EMPTY plan with a clear message rather than fabricating
+            # tasks — the frontend detects the empty plan, tells the user, and
+            # does NOT save it (which previously rotated ids / drained hours).
+            return AIPlanResponse(
+                tasks=[],
+                plan=[],
+                recommendations=[
+                    "⚠️ The AI planner is temporarily unavailable. Please try again in a moment."
+                ],
+            )
     
     def _enforce_schedule_constraints(
         self,

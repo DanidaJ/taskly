@@ -438,6 +438,20 @@ export default function PlannerChat() {
         targetDate
       );
 
+      // AI outage / empty result: surface it and stop — never offer an
+      // un-appliable "plan" (applying an empty plan just re-saves existing tasks).
+      if (!response.plan || response.plan.length === 0) {
+        setMessages((prev) => [...prev, {
+          id: `ai-empty-${Date.now()}`,
+          role: 'assistant',
+          content: response.recommendations?.[0]
+            || "The AI couldn't generate a plan right now — please try again in a moment.",
+          timestamp: new Date(),
+          type: 'text',
+        }]);
+        return; // finally { setIsLoading(false) } runs
+      }
+
       // Learn from the response
       learnFromPlan(response, inputValue);
 

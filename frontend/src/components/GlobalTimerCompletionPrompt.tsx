@@ -183,9 +183,30 @@ export default function GlobalTimerCompletionPrompt() {
       }
     } catch (error) {
       console.error('Failed to save timer completion decision:', error);
+      // A mandatory decision about a task that no longer exists (deleted, or its
+      // id changed) is a contradiction — updatePlannedTask throws "No plan found"
+      // and every retry fails identically, soft-locking the whole app. Resolve in
+      // favour of unblocking: clear the timer and close the prompt. (The focus
+      // session was already recorded when this prompt was raised.)
+      const taskMissing =
+        !task || (error instanceof Error && error.message.includes('No plan found'));
+      if (taskMissing) {
+        try {
+          await activeFocusTimerService.clear();
+        } catch {
+          // ignore — best effort
+        }
+        clearSharedCountdown();
+        clearPrompt();
+        setIncompleteReason('');
+        setSaving(false);
+        toast('That task no longer exists — timer cleared.');
+        return;
+      }
+      // Genuine transient failure: keep the modal open so the user can retry.
       toast.error('Failed to save your answer. Please try again.');
       setSaving(false);
-      return; // Keep the modal open so the user can retry — mandatory decision.
+      return;
     }
 
     try {
