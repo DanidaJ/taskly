@@ -108,10 +108,11 @@ def is_task_missed(task_data: dict, plan_date: str, user_tz: str = "UTC") -> boo
     if status in ('completed', 'in_progress', 'skipped', 'postponed'):
         return False
     try:
-        # Resolve the task window in the user's timezone, with cross-midnight
-        # (23:00–01:00) end-rollover handled centrally. See app.core.timeutils.
+        # Resolve the task window in the user's timezone, anchored on the task's
+        # own real date when set (falls back to the plan date). Cross-midnight
+        # (23:00–01:00) end-rollover is handled centrally. See app.core.timeutils.
         start_dt, end_dt = resolve_task_window(
-            plan_date,
+            task_data.get('scheduled_date') or plan_date,
             task_data.get('scheduled_start'),
             task_data.get('scheduled_end'),
             user_tz,
@@ -315,6 +316,8 @@ async def get_daily_plan(
                 project_id=t.get("project_id"),
                 project_subtask_id=t.get("project_subtask_id"),
                 logged_hours=float(t.get("logged_hours") or 0),
+                cognitive_load=t.get("cognitive_load") or "light_focus",
+                scheduled_date=str(t["scheduled_date"]) if t.get("scheduled_date") else None,
             ))
 
         return DailyPlan(
@@ -482,7 +485,14 @@ async def save_daily_plan(
                     "scheduled_start": task.scheduled_start,
                     "scheduled_end": task.scheduled_end,
                     "estimated_minutes": estimated_minutes,
-                    "cognitive_load": "light_focus",  # Default value
+                    # The AI's real classification (energy-aware scheduling depends
+                    # on it). The DB enum matches this vocabulary since
+                    # migration_cognitive_load_unify.sql.
+                    "cognitive_load": (
+                        task.cognitive_load.value
+                        if hasattr(task.cognitive_load, "value")
+                        else (task.cognitive_load or "light_focus")
+                    ),
                     "priority": api_priority_to_db(api_priority),
                     "status": api_status_to_db(api_status),
                     "flexibility": "flexible",  # Default value
@@ -491,6 +501,9 @@ async def save_daily_plan(
                     "project_id": task.project_id,
                     "project_subtask_id": task.project_subtask_id,
                     "logged_hours": carried_logged,
+                    # Real date the task occurs; manual tasks default to the plan
+                    # date (which IS their calendar date), AI stamps past-midnight.
+                    "scheduled_date": task.scheduled_date or plan.date,
                     "created_at": now,
                     "updated_at": now,
                 }
@@ -539,6 +552,7 @@ async def save_daily_plan(
                     "name": rt['name'],
                     "scheduled_start": sched_start,
                     "scheduled_end": sched_end,
+                    "scheduled_date": plan.date,
                     "estimated_minutes": rt.get('estimated_minutes', 30),
                     "cognitive_load": rt.get('cognitive_load', 'light_focus'),
                     "priority": api_priority_to_db(rt.get('priority', 'medium')),
@@ -604,6 +618,8 @@ async def save_daily_plan(
                     project_id=db_task.get("project_id"),
                     project_subtask_id=db_task.get("project_subtask_id"),
                     logged_hours=float(db_task.get("logged_hours") or 0),
+                    cognitive_load=db_task.get("cognitive_load") or "light_focus",
+                    scheduled_date=str(db_task["scheduled_date"]) if db_task.get("scheduled_date") else None,
                 ))
         
         return DailyPlan(
@@ -1239,6 +1255,8 @@ async def get_daily_plans_range(
                     project_id=t.get("project_id"),
                     project_subtask_id=t.get("project_subtask_id"),
                     logged_hours=float(t.get("logged_hours") or 0),
+                    cognitive_load=t.get("cognitive_load") or "light_focus",
+                    scheduled_date=str(t["scheduled_date"]) if t.get("scheduled_date") else None,
                 ))
 
             result.append(DailyPlan(

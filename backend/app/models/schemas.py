@@ -87,6 +87,13 @@ class PlannedTaskBase(BaseModel):
     order: int = 0
     is_break: bool = False  # Auto-generated break tasks
     depends_on: Optional[List[str]] = None  # Task IDs that must complete first
+    # The task's real calendar date (YYYY-MM-DD). None => the plan's date. Set
+    # explicitly by the AI scheduler for tasks that land past midnight, so no
+    # code has to guess whether a small-hours time belongs to the next day.
+    scheduled_date: Optional[str] = None
+    # The AI's cognitive classification. Carried end-to-end so the scheduler can
+    # match work to energy for real instead of guessing from the task's name.
+    cognitive_load: CognitiveLoad = CognitiveLoad.LIGHT_FOCUS
     # Manual project link. When set, completing this task logs its hours to the
     # project (and optional subtask); logged_hours records the reversible amount.
     project_id: Optional[str] = None
@@ -161,6 +168,11 @@ class AIPlanItem(BaseModel):
     notes: Optional[str] = None
     scheduled_start: Optional[str] = None  # Time when task is scheduled to start (HH:MM)
     scheduled_end: Optional[str] = None  # Time when task is scheduled to end (HH:MM)
+    # The AI's cognitive classification, surfaced so the frontend can save + colour
+    # tasks by real type instead of it being stripped on the way out.
+    cognitive_load: str = "light_focus"
+    # Real calendar date the block occurs (YYYY-MM-DD); set for past-midnight blocks.
+    scheduled_date: Optional[str] = None
 
 
 class AIPlanResponse(BaseModel):

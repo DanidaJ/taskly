@@ -672,6 +672,11 @@ class AIService:
                     "flexibility": flexibility,
                 })
             
+            # The AI returns classification on tasks[] but scheduling data on
+            # plan[]; join them by name so the cognitive type reaches the
+            # scheduler (it used to guess from task-name keywords).
+            type_by_name = {t["name"].lower().strip(): t["type"] for t in tasks}
+
             # Extract plan with proper validation
             plan = []
             for p in response_data.get("plan", []):
@@ -684,11 +689,13 @@ class AIService:
                 if not isinstance(duration, str):
                     duration = f"{duration} minutes"
                 
+                plan_name = p.get("task_name", "")
                 plan.append({
-                    "task_name": p.get("task_name", ""),
+                    "task_name": plan_name,
                     "suggested_duration": duration,
                     "priority": priority,
                     "notes": p.get("notes"),
+                    "cognitive_load": type_by_name.get(plan_name.lower().strip(), "light_focus"),
                 })
 
             # Enforce an explicit task-count cap if the user stated one
@@ -790,7 +797,8 @@ class AIService:
                     status="pending",
                     notes=item.get("notes"),
                     scheduled_start=scheduled_start,
-                    scheduled_end=scheduled_end
+                    scheduled_end=scheduled_end,
+                    cognitive_load=item.get("cognitive_load", "light_focus"),
                 )
                 planned_tasks.append(planned_task)
                 logger.info(f"Created planned task: {item['task_name']}, duration: {item['suggested_duration']}")
@@ -829,7 +837,13 @@ class AIService:
                     "priority": task.priority.value if hasattr(task.priority, 'value') else task.priority,
                     "notes": task.notes,
                     "scheduled_start": task.scheduled_start,
-                    "scheduled_end": task.scheduled_end
+                    "scheduled_end": task.scheduled_end,
+                    "cognitive_load": (
+                        task.cognitive_load.value
+                        if hasattr(task.cognitive_load, "value")
+                        else task.cognitive_load
+                    ),
+                    "scheduled_date": task.scheduled_date,
                 }
                 if task.scheduled_start and task.scheduled_end:
                     logger.info(f"✅ Scheduled task: {task.task_name} at {task.scheduled_start} - {task.scheduled_end}")
@@ -848,8 +862,14 @@ class AIService:
             # Return original plan if scheduling fails
             return plan_items
 
-    async def update_plan(self, request: AIPlanUpdateRequest) -> AIPlanResponse:
-        """Update an existing plan based on user modifications"""
+    async def update_plan(self, request: AIPlanUpdateRequest, user_tz: str = "UTC") -> AIPlanResponse:
+        """Update an existing plan based on user modifications.
+
+        Re-applies timezone-aware schedule enforcement (like ``generate_plan``)
+        so a modified plan judges "now"/"today" in the user's zone instead of
+        UTC. A modify request carries no explicit date, so it defaults to today
+        in the user's timezone.
+        """
         prompt = f"""Current plan:
 {json.dumps(request.current_plan.model_dump(), indent=2)}
 
@@ -857,11 +877,39 @@ User modifications: {request.modifications}
 
 Please update the plan according to the user's modifications while maintaining energy-aware scheduling.
 Respond with the updated JSON in the same format."""
-        
+
         try:
             response_text = await self._call_agent(prompt)
             response_data = self._parse_json_response(response_text)
-            return AIPlanResponse(**response_data)
+
+            tasks = response_data.get("tasks", [])
+            type_by_name = {
+                t.get("name", "").lower().strip(): t.get("type", "light_focus")
+                for t in tasks if isinstance(t, dict)
+            }
+            plan = []
+            for p in response_data.get("plan", []):
+                if not isinstance(p, dict):
+                    continue
+                name = p.get("task_name", "")
+                plan.append({
+                    "task_name": name,
+                    "suggested_duration": p.get("suggested_duration", "30 minutes"),
+                    "priority": p.get("priority", "medium"),
+                    "notes": p.get("notes"),
+                    "cognitive_load": p.get("cognitive_load")
+                    or type_by_name.get(name.lower().strip(), "light_focus"),
+                })
+
+            target_date = user_now(user_tz).date().isoformat()
+            plan = self._enforce_schedule_constraints(
+                plan, target_date, request.user_context, user_tz=user_tz,
+            )
+            return AIPlanResponse(
+                tasks=tasks,
+                plan=plan,
+                recommendations=response_data.get("recommendations", []),
+            )
         except Exception as e:
             logger.error("Error updating plan", error=str(e))
             return request.current_plan

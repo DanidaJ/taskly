@@ -9,6 +9,7 @@ import Schedule from '@/pages/Schedule';
 import Reflection from '@/pages/Reflection';
 import Settings from '@/pages/Settings';
 import Auth from '@/pages/Auth';
+import ResetPassword from '@/pages/ResetPassword';
 import FocusTimer from '@/pages/FocusTimer';
 import SleepTracker from '@/pages/SleepTracker';
 import Analytics from '@/pages/Analytics';
@@ -98,6 +99,8 @@ function App() {
 
         {/* App Routes */}
         <Route path="/app/auth" element={<Auth />} />
+        {/* Public: the recovery link lands here before a real session exists. */}
+        <Route path="/app/reset-password" element={<ResetPassword />} />
         <Route
           path="/app"
           element={

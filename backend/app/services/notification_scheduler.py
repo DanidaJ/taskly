@@ -81,7 +81,9 @@ async def _process_user_task_reminders(user_id: str, dry_run: bool = False) -> d
     tz = _user_tz(prefs)
     minutes_before = int(prefs.get("reminder_minutes_before", 15))
     now_local = datetime.now(tz)
-    today_str = now_local.date().isoformat()
+    today = now_local.date()
+    today_str = today.isoformat()
+    yesterday_str = (today - timedelta(days=1)).isoformat()
     report.update({
         "timezone": str(tz),
         "now_local": now_local.strftime("%Y-%m-%d %H:%M:%S"),
@@ -89,75 +91,113 @@ async def _process_user_task_reminders(user_id: str, dry_run: bool = False) -> d
         "reminder_minutes_before": minutes_before,
     })
 
-    plan = await db.get_daily_plan(user_id, today_str)
-    if not plan:
-        report["reason"] = f"no daily plan for {today_str}"
+    # Scan today's AND yesterday's plans. Each task carries its own real date
+    # (scheduled_date); yesterday's plan can still hold a task whose real date is
+    # today (an AI-planned post-midnight block saved on the previous evening's
+    # plan), so both are needed. No timezone/sleep guessing — the date is stored.
+    plans = []
+    for d in (today_str, yesterday_str):
+        p = await db.get_daily_plan(user_id, d)
+        if p:
+            plans.append((d, p.get("planned_tasks") or []))
+    if not plans:
+        report["reason"] = f"no daily plan for {today_str} or {yesterday_str}"
         return report
-    tasks = plan.get("planned_tasks") or []
-    report["task_count"] = len(tasks)
+    report["task_count"] = sum(len(ts) for _, ts in plans)
     fire_window = timedelta(minutes=5)
 
-    for t in tasks:
-        start_str = t.get("scheduled_start")
-        status = (t.get("status") or "").lower()
-        entry: dict = {"name": t.get("name"), "scheduled_start": start_str, "status": status}
-        if not start_str:
-            entry["skipped"] = "no scheduled_start"
-            report["tasks"].append(entry)
-            continue
-        if status in ("completed", "skipped", "cancelled"):
-            entry["skipped"] = f"status={status}"
-            report["tasks"].append(entry)
-            continue
-        start_t = _parse_hhmm(start_str[:5])
-        if not start_t:
-            entry["skipped"] = "unparseable start time"
-            report["tasks"].append(entry)
-            continue
-        start_dt = tz.localize(datetime.combine(now_local.date(), start_t))
-        fire_at = start_dt - timedelta(minutes=minutes_before)
-        in_pre = minutes_before > 0 and fire_at <= now_local < fire_at + fire_window
-        in_now = start_dt <= now_local < start_dt + fire_window
-        entry.update({
-            "pre_reminder_window": f"{fire_at.strftime('%H:%M')}–{(fire_at + fire_window).strftime('%H:%M')}",
-            "now_reminder_window": f"{start_dt.strftime('%H:%M')}–{(start_dt + fire_window).strftime('%H:%M')}",
-            "in_pre_window": in_pre,
-            "in_now_window": in_now,
-        })
+    for plan_date_str, tasks in plans:
+        plan_date = date.fromisoformat(plan_date_str[:10])
+        for t in tasks:
+            start_str = t.get("scheduled_start")
+            status = (t.get("status") or "").lower()
+            entry: dict = {
+                "name": t.get("name"),
+                "plan_date": plan_date_str,
+                "scheduled_start": start_str,
+                "status": status,
+            }
+            if not start_str:
+                entry["skipped"] = "no scheduled_start"
+                report["tasks"].append(entry)
+                continue
+            if status in ("completed", "skipped", "cancelled"):
+                entry["skipped"] = f"status={status}"
+                report["tasks"].append(entry)
+                continue
+            # Auto-generated breaks lose their is_break flag on save (no column),
+            # so match by name — a user shouldn't get "Up next: Break (15 min)".
+            name = t.get("name") or ""
+            if name.startswith("Break (") and name.endswith(" min)"):
+                entry["skipped"] = "auto-break"
+                report["tasks"].append(entry)
+                continue
+            start_t = _parse_hhmm(start_str[:5])
+            if not start_t:
+                entry["skipped"] = "unparseable start time"
+                report["tasks"].append(entry)
+                continue
 
-        # 1) "Starts in X minutes" reminder
-        if in_pre:
-            dedupe = f"task_reminder:{t['id']}:{today_str}"
-            if dry_run:
-                entry["pre_already_sent"] = await db.has_sent_notification(user_id, dedupe)
-                entry["would_send_pre"] = True
-            else:
-                entry["sent_pre"] = await notification_service.send_to_user(
-                    user_id=user_id,
-                    title=f"Up next: {t.get('name', 'Task')}",
-                    body=f"Starts in {minutes_before} min ({start_str[:5]})",
-                    notif_type="task_reminder",
-                    data={"task_id": str(t.get("id", "")), "url": "/app/schedule"},
-                    dedupe_key=dedupe,
-                )
+            # The task's real instant is unambiguous: its own scheduled_date
+            # (falling back to the plan date for older rows / manual tasks whose
+            # plan date already IS their real date) at scheduled_start. No guessing.
+            eff_date = t.get("scheduled_date") or plan_date_str
+            try:
+                real_date = date.fromisoformat(str(eff_date)[:10])
+            except ValueError:
+                real_date = plan_date
+            start_dt = tz.localize(datetime.combine(real_date, start_t))
 
-        # 2) "Scheduled now" reminder at exact start time
-        if in_now:
-            dedupe_now = f"task_start:{t['id']}:{today_str}"
-            task_name = t.get("name", "Task")
-            if dry_run:
-                entry["now_already_sent"] = await db.has_sent_notification(user_id, dedupe_now)
-                entry["would_send_now"] = True
-            else:
-                entry["sent_now"] = await notification_service.send_to_user(
-                    user_id=user_id,
-                    title=f"Now: {task_name}",
-                    body=f'You have "{task_name}" scheduled now.',
-                    notif_type="task_reminder",
-                    data={"task_id": str(t.get("id", "")), "url": "/app/schedule", "event": "task_start"},
-                    dedupe_key=dedupe_now,
-                )
-        report["tasks"].append(entry)
+            in_pre = in_now = False
+            for cand in (start_dt,):
+                fire_at = cand - timedelta(minutes=minutes_before)
+                if minutes_before > 0 and fire_at <= now_local < fire_at + fire_window:
+                    in_pre = True
+                if cand <= now_local < cand + fire_window:
+                    in_now = True
+            entry.update({
+                "resolved_instant": start_dt.strftime("%Y-%m-%d %H:%M"),
+                "in_pre_window": in_pre,
+                "in_now_window": in_now,
+            })
+
+            # Dedupe on the task's real date so it fires at most once, even if it
+            # surfaces in both the today and yesterday plan scans.
+            real_date_key = real_date.isoformat()
+
+            # 1) "Starts in X minutes" reminder
+            if in_pre:
+                dedupe = f"task_reminder:{t['id']}:{real_date_key}"
+                if dry_run:
+                    entry["pre_already_sent"] = await db.has_sent_notification(user_id, dedupe)
+                    entry["would_send_pre"] = True
+                else:
+                    entry["sent_pre"] = await notification_service.send_to_user(
+                        user_id=user_id,
+                        title=f"Up next: {t.get('name', 'Task')}",
+                        body=f"Starts in {minutes_before} min ({start_str[:5]})",
+                        notif_type="task_reminder",
+                        data={"task_id": str(t.get("id", "")), "url": "/app/schedule"},
+                        dedupe_key=dedupe,
+                    )
+
+            # 2) "Scheduled now" reminder at exact start time
+            if in_now:
+                dedupe_now = f"task_start:{t['id']}:{real_date_key}"
+                task_name = t.get("name", "Task")
+                if dry_run:
+                    entry["now_already_sent"] = await db.has_sent_notification(user_id, dedupe_now)
+                    entry["would_send_now"] = True
+                else:
+                    entry["sent_now"] = await notification_service.send_to_user(
+                        user_id=user_id,
+                        title=f"Now: {task_name}",
+                        body=f'You have "{task_name}" scheduled now.',
+                        notif_type="task_reminder",
+                        data={"task_id": str(t.get("id", "")), "url": "/app/schedule", "event": "task_start"},
+                        dedupe_key=dedupe_now,
+                    )
+            report["tasks"].append(entry)
 
     return report
 

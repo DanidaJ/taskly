@@ -19,7 +19,27 @@ export default function Auth() {
   // Email a verification link was sent to (drives the "check your inbox" screen).
   const [pendingEmail, setPendingEmail] = useState('');
 
-  const { signIn, signUp, resendConfirmation, isAuthenticated } = useAuthStore();
+  const { signIn, signUp, resendConfirmation, requestPasswordReset, isAuthenticated } = useAuthStore();
+  const [sendingReset, setSendingReset] = useState(false);
+
+  // Send a reset link to whatever's in the email field. Deliberately reports the
+  // same message whether or not the address exists, so this can't be used to
+  // probe which emails are registered (matches the sign-up anti-enumeration).
+  const handleForgotPassword = async () => {
+    if (!email.trim()) {
+      toast.error('Enter your email address first, then tap "Forgot password?".');
+      return;
+    }
+    setSendingReset(true);
+    try {
+      await requestPasswordReset(email.trim());
+      toast.success("If that email has an account, a reset link is on its way.");
+    } catch (error: any) {
+      toast.error(error?.message || 'Could not send the reset email. Please try again.');
+    } finally {
+      setSendingReset(false);
+    }
+  };
 
   // If a session becomes active while on this page — notably after clicking an
   // email-confirmation link that lands on /app and gets bounced here before the
@@ -238,6 +258,19 @@ export default function Auth() {
                   required
                   helperText={mode === 'signup' ? `At least ${MIN_PASSWORD_LENGTH} characters` : undefined}
                 />
+
+                {mode === 'signin' && (
+                  <div className="flex justify-end -mt-2">
+                    <button
+                      type="button"
+                      onClick={handleForgotPassword}
+                      disabled={sendingReset}
+                      className="text-xs font-medium text-blue-600 hover:text-blue-700 disabled:opacity-50"
+                    >
+                      {sendingReset ? 'Sending reset link…' : 'Forgot password?'}
+                    </button>
+                  </div>
+                )}
 
                 <AnimatePresence mode="wait">
                   {mode === 'signup' && (

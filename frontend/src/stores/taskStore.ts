@@ -17,14 +17,15 @@ const syncDailyTaskStats = (date: string, plannedTasks: PlannedTask[]) => {
   const skipped = plannedTasks.filter(t => t.status === 'skipped').length;
   const total = plannedTasks.length;
 
-  // Sync to backend (fire-and-forget)
+  // Sync to backend (fire-and-forget). Note: focus_minutes is intentionally NOT
+  // written here — real focus time lives in focus_sessions; writing 0 on every
+  // status change only produced a misleading daily_stats.focus_minutes.
   dailyStatsService.save({
     date,
     tasks_completed: completed,
     tasks_missed: missed,
     tasks_skipped: skipped,
     tasks_total: total,
-    focus_minutes: 0,
   }).catch(() => {});
 };
 
@@ -317,12 +318,13 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       console.log('🔍 AI Plan Response:', response);
       console.log('📅 Target date for plan:', planDate);
 
-      // Load current plan from database to ensure we have the latest tasks for this date
-      let currentPlan = state.plansByDate[planDate];
-      if (!currentPlan) {
-        // Try loading from API if not in plansByDate
-        currentPlan = await planService.getForDate(planDate).catch(() => undefined);
-      }
+      // ALWAYS fetch the freshest plan before merging — reading the possibly
+      // stale plansByDate could re-save statuses that another tab, another
+      // device, or the missed-task sweep already changed. Fall back to the
+      // in-memory copy only if the fetch fails.
+      const currentPlan: DailyPlan | undefined =
+        (await planService.getForDate(planDate).catch(() => undefined)) ||
+        state.plansByDate[planDate];
 
       // Convert plan items to PlannedTask objects (no separate task entries needed)
       const aiTasks: PlannedTask[] = response.plan.map((item, index) => {
@@ -352,6 +354,12 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
           scheduled_end: scheduled_end,
           status: 'pending' as const,
           order: index,
+          // Carry the AI's cognitive type so it's saved + colours the calendar
+          // (otherwise the backend defaults it to light_focus on save).
+          cognitive_load: item.cognitive_load,
+          // Carry the real calendar date the AI stamped (past-midnight blocks);
+          // manual tasks leave this unset and default to the plan's date on save.
+          scheduled_date: item.scheduled_date,
         };
       });
 
@@ -727,6 +735,9 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
           id: `rescheduled-${Date.now()}`,
           scheduled_start: result.scheduled_start,
           scheduled_end: result.scheduled_end,
+          // Moved to a new day → its real date is the new date (don't carry the
+          // spread-in old scheduled_date, which would misfire reminders/missed).
+          scheduled_date: result.date,
           status: 'pending' as const,
           actual_start: undefined,
           actual_end: undefined,

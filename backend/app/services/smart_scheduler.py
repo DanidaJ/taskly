@@ -116,38 +116,90 @@ def get_task_priority_score(task: PlannedTask) -> int:
     return priority_scores.get(priority, 2)
 
 
+VALID_COGNITIVE_TYPES = ("deep_focus", "light_focus", "admin", "physical", "recovery")
+
+
+def infer_cognitive_type(task: PlannedTask) -> str:
+    """The task's cognitive type.
+
+    Prefers the AI's own classification (carried on the task). The name-keyword
+    guess is only a last resort for tasks that never went through the AI — e.g.
+    recurring injections or hand-made tasks.
+    """
+    declared = getattr(task, "cognitive_load", None)
+    declared = declared.value if hasattr(declared, "value") else declared
+    if declared in VALID_COGNITIVE_TYPES:
+        return declared
+
+    name = (task.task_name or "").lower()
+    if any(w in name for w in ["code", "design", "write", "create", "build"]):
+        return "deep_focus"
+    if any(w in name for w in ["exercise", "workout", "walk", "run", "gym"]):
+        return "physical"
+    if any(w in name for w in ["email", "call", "meeting", "review"]):
+        return "light_focus"
+    if any(w in name for w in ["break", "rest", "relax", "meal"]):
+        return "recovery"
+    if any(w in name for w in ["schedule", "organize", "plan"]):
+        return "admin"
+    return "light_focus"
+
+
 def categorize_tasks_by_type(tasks: List[PlannedTask]) -> dict:
     """Group tasks by cognitive load type"""
-    categorized = {
-        "deep_focus": [],
-        "light_focus": [],
-        "admin": [],
-        "physical": [],
-        "recovery": []
-    }
-    
+    categorized = {t: [] for t in VALID_COGNITIVE_TYPES}
     for task in tasks:
-        # Try to infer cognitive type if not explicitly set
-        # (You might need to add a cognitive_type field to PlannedTask)
-        task_name_lower = task.task_name.lower()
-        
-        # Simple heuristic based on task name
-        if any(word in task_name_lower for word in ["code", "design", "write", "create", "build"]):
-            cognitive_type = "deep_focus"
-        elif any(word in task_name_lower for word in ["exercise", "workout", "walk", "run", "gym"]):
-            cognitive_type = "physical"
-        elif any(word in task_name_lower for word in ["email", "call", "meeting", "review"]):
-            cognitive_type = "light_focus"
-        elif any(word in task_name_lower for word in ["break", "rest", "relax", "meal"]):
-            cognitive_type = "recovery"
-        elif any(word in task_name_lower for word in ["schedule", "organize", "plan"]):
-            cognitive_type = "admin"
-        else:
-            cognitive_type = "light_focus"  # Default
-        
-        categorized[cognitive_type].append(task)
-    
+        categorized[infer_cognitive_type(task)].append(task)
     return categorized
+
+
+# Per-cognitive-type search order over slot energy quality (best first).
+QUALITY_PREF = {
+    "deep_focus": ["peak", "good", "normal", "low"],
+    "physical": ["good", "normal", "peak", "low"],
+    "light_focus": ["normal", "good", "low", "peak"],
+    "admin": ["normal", "good", "low", "peak"],
+    "recovery": ["low", "normal", "good", "peak"],
+}
+# Lower weight = allocated earlier (first pick of peak/earlier slots): deep work first.
+_TYPE_WEIGHT = {"deep_focus": 0, "physical": 1, "light_focus": 2, "admin": 3, "recovery": 4}
+
+
+def _dependency_order(tasks: List[PlannedTask]) -> List[PlannedTask]:
+    """Order tasks so every task's prerequisites (``depends_on``, referenced by
+    ``task_id``) come before it, breaking ties by energy weight (deep_focus
+    first) then priority. This is the SINGLE source of ordering — the old code
+    topologically sorted and then discarded it by regrouping into type buckets,
+    so a deep-focus task could be scheduled before the admin task it depended on.
+
+    Circular/unresolvable dependencies fall back to appending the remainder
+    in-order rather than dropping tasks.
+    """
+    by_id = {t.task_id: t for t in tasks if t.task_id}
+    pending = {
+        id(t): ({d for d in (t.depends_on or []) if d in by_id} if t.task_id else set())
+        for t in tasks
+    }
+
+    def key(t: PlannedTask):
+        return (_TYPE_WEIGHT.get(infer_cognitive_type(t), 2), -get_task_priority_score(t))
+
+    ordered: List[PlannedTask] = []
+    pool = list(tasks)
+    while pool:
+        ready = [t for t in pool if not pending[id(t)]]
+        if not ready:
+            logger.warning("Circular/unresolvable task dependencies — scheduling remainder as-is")
+            ordered.extend(pool)
+            break
+        ready.sort(key=key)
+        chosen = ready[0]
+        ordered.append(chosen)
+        pool.remove(chosen)
+        if chosen.task_id:
+            for t in pool:
+                pending[id(t)].discard(chosen.task_id)
+    return ordered
 
 
 def create_break_task(duration_minutes: int, start: datetime) -> PlannedTask:
@@ -161,6 +213,7 @@ def create_break_task(duration_minutes: int, start: datetime) -> PlannedTask:
         notes="Auto-generated break for recovery",
         scheduled_start=start.strftime("%H:%M"),
         scheduled_end=(start + timedelta(minutes=duration_minutes)).strftime("%H:%M"),
+        scheduled_date=start.date().isoformat(),
         status=TaskStatus.PENDING,
         order=0,
         is_break=True
@@ -197,18 +250,7 @@ def smart_schedule(
     logger.info("Starting smart scheduling",
                 task_count=len(tasks),
                 slot_count=len(available_slots))
-    
-    # Step 0: Resolve dependencies (sort tasks respecting constraints)
-    from app.services.dependency_resolver import topological_sort, CircularDependencyError
-    
-    try:
-        tasks = topological_sort(tasks)
-        logger.info("✓ Dependencies resolved",
-                   dependent_tasks=len([t for t in tasks if t.depends_on]))
-    except CircularDependencyError as e:
-        logger.error("Circular dependency detected!", error=str(e))
-        # Continue without reordering, but log the issue
-    
+
     # Step 1: Build a mutable list of available time chunks, sorted chronologically
     # Each chunk tracks its remaining capacity
     time_chunks = []
@@ -257,126 +299,124 @@ def smart_schedule(
             return "good"
         return "normal"
     
-    # Step 2: Categorize tasks by cognitive type
-    tasks_by_type = categorize_tasks_by_type(tasks)
-    
-    # Debug: Log task categorization
-    for task_type, task_list in tasks_by_type.items():
-        if task_list:
-            logger.info(f"📋 {task_type}: {[t.task_name for t in task_list]}")
-    
-    # Step 3: Sort tasks by priority within each type
-    for task_type in tasks_by_type:
-        tasks_by_type[task_type].sort(key=get_task_priority_score, reverse=True)
-    
-    # Step 4: Build an ordered allocation queue
-    # Priority: deep_focus first (peak slots), then physical (good), then rest
-    allocation_order = []
-    
-    # Deep focus tasks prefer peak energy slots
-    for task in tasks_by_type["deep_focus"]:
-        allocation_order.append((task, ["peak", "good", "normal", "low"]))
-    
-    # Physical tasks prefer good energy slots
-    for task in tasks_by_type["physical"]:
-        allocation_order.append((task, ["good", "normal", "peak", "low"]))
-    
-    # Light focus, admin, recovery fill remaining
-    for task_type in ["light_focus", "admin", "recovery"]:
-        for task in tasks_by_type[task_type]:
-            allocation_order.append((task, ["normal", "good", "low", "peak"]))
-    
-    # Step 5: Allocate tasks to chunks, tracking remaining capacity
+    # Step 2: Order tasks — prerequisites before dependents, energy weight and
+    # priority as tie-breakers (a single ordering, not sort-then-discard).
+    ordered_tasks = _dependency_order(tasks)
+    logger.info("Allocation order",
+                order=[f"{t.task_name}[{infer_cognitive_type(t)}]" for t in ordered_tasks])
+
+    # Step 3: Allocate. Each task honors its cognitive type's energy preference
+    # AND cannot start before all of its prerequisites have ended.
     scheduled_tasks = []
     continuous_work_minutes = 0
-    
-    for task, preferred_qualities in allocation_order:
+    prev_end_dt = None    # end of the previously placed task, to detect rest gaps
+    start_dt: dict = {}   # id(task) -> start datetime, for correct cross-midnight ordering
+    end_dt: dict = {}     # task_id -> end datetime, to gate dependents' earliest start
+
+    def earliest_start_for(task):
+        deps = [d for d in (task.depends_on or []) if d in end_dt] if task.task_id else []
+        return max((end_dt[d] for d in deps), default=None)
+
+    def placement(chunk, min_start, duration):
+        """Effective start if the task fits in this chunk given its earliest
+        allowed start, else None (a dependency gap starts the task later)."""
+        est = max(chunk["cursor"], min_start) if min_start else chunk["cursor"]
+        if est + timedelta(minutes=duration) <= chunk["end"]:
+            return est
+        return None
+
+    for task in ordered_tasks:
         task_duration = schedule_service.parse_duration(task.suggested_duration)
-        
         if task_duration <= 0:
             task_duration = 30  # Default fallback
-        
-        # Find the best chunk: prefer energy-matched, then any with capacity
-        best_chunk = None
-        best_chunk_idx = None
-        
-        # First pass: try to find a chunk matching preferred energy quality
+        min_start = earliest_start_for(task)
+        preferred_qualities = QUALITY_PREF.get(infer_cognitive_type(task), QUALITY_PREF["light_focus"])
+
+        best_chunk = best_chunk_idx = best_est = None
+
+        # Pass 1: energy-matched chunk that fits (respecting earliest start)
         for quality in preferred_qualities:
             for idx, chunk in enumerate(time_chunks):
-                if chunk["remaining"] >= task_duration and get_chunk_quality(chunk) == quality:
-                    best_chunk = chunk
-                    best_chunk_idx = idx
+                est = placement(chunk, min_start, task_duration)
+                if est is not None and get_chunk_quality({**chunk, "cursor": est}) == quality:
+                    best_chunk, best_chunk_idx, best_est = chunk, idx, est
                     break
             if best_chunk:
                 break
-        
-        # Second pass: if no energy-matched chunk, take any chunk with enough capacity
+
+        # Pass 2: any chunk that fits
         if not best_chunk:
             for idx, chunk in enumerate(time_chunks):
-                if chunk["remaining"] >= task_duration:
-                    best_chunk = chunk
-                    best_chunk_idx = idx
+                est = placement(chunk, min_start, task_duration)
+                if est is not None:
+                    best_chunk, best_chunk_idx, best_est = chunk, idx, est
                     break
-        
-        # Third pass: if no chunk has full capacity, try to fit in the largest remaining chunk 
+
+        # Pass 3: truncate into the largest chunk that can still start on time
         if not best_chunk:
-            largest_chunk = None
-            largest_remaining = 0
+            largest_room = 0
             for idx, chunk in enumerate(time_chunks):
-                if chunk["remaining"] > largest_remaining:
-                    largest_remaining = chunk["remaining"]
-                    largest_chunk = chunk
-                    best_chunk_idx = idx
-            if largest_chunk and largest_remaining >= 15:  # At least 15 min
-                best_chunk = largest_chunk
-                task_duration = min(task_duration, largest_remaining)
+                est = placement(chunk, min_start, 15)  # room for at least 15 min?
+                if est is None:
+                    continue
+                room = int((chunk["end"] - est).total_seconds() / 60)
+                if room > largest_room:
+                    largest_room, best_chunk, best_chunk_idx, best_est = room, chunk, idx, est
+            if best_chunk and largest_room >= 15:
+                task_duration = min(task_duration, largest_room)
                 logger.warning(f"Task {task.task_name} truncated to {task_duration}min to fit available time")
-        
+            else:
+                best_chunk = None
+
         if not best_chunk:
             logger.warning(f"No available time for task: {task.task_name}")
-            scheduled_tasks.append(task)  # Add without scheduled times
+            scheduled_tasks.append(task)  # unscheduled (no times)
             continue
-        
-        # Check if we need a break BEFORE this task
+
+        # A gap before this task (a chunk jump across a commitment, or a
+        # dependency wait) means the user already rested — don't carry earlier
+        # continuous work toward a break they don't need.
+        if prev_end_dt is not None and best_est > prev_end_dt:
+            continuous_work_minutes = 0
+
+        # Optional break before this task
         if include_breaks and continuous_work_minutes >= 90:
             break_duration = 15
-            if best_chunk["remaining"] >= task_duration + break_duration:
-                break_start = best_chunk["cursor"]
-                break_task = create_break_task(break_duration, break_start)
+            if best_est + timedelta(minutes=break_duration + task_duration) <= best_chunk["end"]:
+                break_task = create_break_task(break_duration, best_est)
                 scheduled_tasks.append(break_task)
-                # Advance cursor for the break
-                best_chunk["cursor"] = best_chunk["cursor"] + timedelta(minutes=break_duration)
-                best_chunk["remaining"] -= break_duration
+                start_dt[id(break_task)] = best_est
+                best_est = best_est + timedelta(minutes=break_duration)
                 continuous_work_minutes = 0
-        
-        # Schedule the task at the chunk's cursor position
-        task_start = best_chunk["cursor"]
+
+        task_start = best_est
         task_end = task_start + timedelta(minutes=task_duration)
-        
         task.scheduled_start = task_start.strftime("%H:%M")
         task.scheduled_end = task_end.strftime("%H:%M")
-        
-        # Advance the chunk's cursor and reduce remaining capacity
+        # Stamp the REAL calendar date (a night-owl slot puts this past midnight
+        # on the next day) so no downstream code has to guess it.
+        task.scheduled_date = task_start.date().isoformat()
+        start_dt[id(task)] = task_start
+        if task.task_id:
+            end_dt[task.task_id] = task_end
+
+        # Consume this chunk from its old cursor through the task end (any idle
+        # gap forced by a dependency earliest-start is consumed too).
+        best_chunk["remaining"] -= int((task_end - best_chunk["cursor"]).total_seconds() / 60)
         best_chunk["cursor"] = task_end
-        best_chunk["remaining"] -= task_duration
-        
-        # Remove chunk if fully exhausted
         if best_chunk["remaining"] <= 0:
             time_chunks.pop(best_chunk_idx)
-        
+
         scheduled_tasks.append(task)
-        
-        if task.task_name and not task.task_name.startswith("Break"):
-            continuous_work_minutes += task_duration
-        else:
-            continuous_work_minutes = 0
-        
-        chunk_quality = get_chunk_quality({"cursor": task_start, "start": task_start, "end": task_end, "remaining": 0})
-        logger.info(f"✨ Scheduled '{task.task_name}' at {task.scheduled_start}-{task.scheduled_end} ({chunk_quality} slot)")
-    
-    # Sort all scheduled tasks chronologically
-    scheduled_tasks.sort(key=lambda t: t.scheduled_start if t.scheduled_start else '99:99')
-    
+        continuous_work_minutes = 0 if task.is_break else continuous_work_minutes + task_duration
+        prev_end_dt = task_end
+
+        logger.info(f"✨ Scheduled '{task.task_name}' at {task.scheduled_start}-{task.scheduled_end}")
+
+    # Step 4: order by real start instant so a 00:30 task sorts AFTER 23:00 (a
+    # plain HH:MM string sort puts it first); unscheduled tasks sink to the end.
+    scheduled_tasks.sort(key=lambda t: start_dt.get(id(t), datetime.max))
+
     scheduled_count = len([t for t in scheduled_tasks if t.scheduled_start])
     unscheduled_count = len([t for t in scheduled_tasks if not t.scheduled_start])
     logger.info("Smart scheduling complete",

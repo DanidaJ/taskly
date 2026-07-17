@@ -4,9 +4,7 @@ import {
   Settings as SettingsIcon,
   User,
   Moon,
-  Sun,
   Bell,
-  Clock,
   Zap,
   Calendar,
   Save,
@@ -21,32 +19,80 @@ import {
   Utensils,
   Coffee,
   Heart,
+  Download,
+  AlertTriangle,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { useUserProfileStore, useAuthStore } from '@/stores';
 import { Commitment, CommitmentType, ROUTINE_TYPES, EnergyPreference, CognitiveLoad, RecurringTask, RecurrenceType, RoutineTemplate, PresetTemplate } from '@/types';
 import { Button, Input, Modal } from '@/components/ui';
-import { commitmentService, profileService, recurringTaskService, routineTemplateService, notificationService as pushNotificationService, NotificationPreferences } from '@/services/api';
+import { commitmentService, profileService, recurringTaskService, routineTemplateService, notificationService as pushNotificationService, NotificationPreferences, accountService } from '@/services/api';
 import { requestNotificationPermission, ensureFcmTokenRegistered, unregisterFcmToken, getNotificationPermission, isPushSupported } from '@/services/firebase';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
 
 export default function Settings() {
-  const [activeTab, setActiveTab] = useState<'profile' | 'energy' | 'sleep' | 'commitments' | 'routines' | 'notifications'>('profile');
+  const [activeTab, setActiveTab] = useState<'profile' | 'energy' | 'commitments' | 'routines' | 'notifications'>('profile');
   const [isCommitmentModalOpen, setIsCommitmentModalOpen] = useState(false);
   const [isRecurringTaskModalOpen, setIsRecurringTaskModalOpen] = useState(false);
   const [recurringTasks, setRecurringTasks] = useState<RecurringTask[]>([]);
   const [routineTemplates, setRoutineTemplates] = useState<RoutineTemplate[]>([]);
   const [presets, setPresets] = useState<Record<string, PresetTemplate>>({});
   const [presetsLoaded, setPresetsLoaded] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleting, setDeleting] = useState(false);
 
-  const { user, updateUser } = useAuthStore();
+  const navigate = useNavigate();
+  const { user, updateUser, signOut } = useAuthStore();
+
+  // Download the full JSON export as a file (GDPR portability).
+  const handleExportData = async () => {
+    setExporting(true);
+    try {
+      const data = await accountService.exportData();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `taskly-export-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      toast.success('Your data has been downloaded.');
+    } catch (error) {
+      console.error('Failed to export data:', error);
+      toast.error('Could not export your data. Please try again.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // Irreversible. Deleting the auth user cascades every table server-side.
+  const handleDeleteAccount = async () => {
+    setDeleting(true);
+    try {
+      await accountService.deleteAccount();
+      toast.success('Your account has been deleted.');
+      try {
+        await signOut();
+      } catch {
+        // The user is already gone server-side; a failed sign-out is harmless.
+      }
+      navigate('/');
+    } catch (error) {
+      console.error('Failed to delete account:', error);
+      toast.error('Could not delete your account. Please try again or contact support.');
+      setDeleting(false);
+    }
+  };
   const {
     energyProfile,
-    sleepSchedule,
     preferences,
     commitments,
     setEnergyProfile,
-    setSleepSchedule,
     setPreferences,
     addCommitment,
     deleteCommitment,
@@ -54,10 +100,6 @@ export default function Settings() {
 
   // Form states
   const [fullName, setFullName] = useState(user?.full_name || '');
-  const [wakeTime, setWakeTime] = useState(sleepSchedule?.wake_time || '07:00');
-  const [sleepTime, setSleepTime] = useState(sleepSchedule?.sleep_time || '23:00');
-  const [windDownMinutes, setWindDownMinutes] = useState(sleepSchedule?.wind_down_minutes || 30);
-  const [preferredEndTime, setPreferredEndTime] = useState(sleepSchedule?.preferred_end_time || '');
   const [energyPreference, setEnergyPreference] = useState<EnergyPreference>(
     energyProfile?.preference || 'morning'
   );
@@ -242,7 +284,6 @@ export default function Settings() {
   const tabs = [
     { id: 'profile', label: 'Profile', icon: User },
     { id: 'energy', label: 'Energy', icon: Zap },
-    { id: 'sleep', label: 'Sleep', icon: Moon },
     { id: 'commitments', label: 'Commitments', icon: Calendar },
     { id: 'routines', label: 'Routines', icon: Repeat },
     { id: 'notifications', label: 'Notifications', icon: Bell },
@@ -278,27 +319,6 @@ export default function Settings() {
     } catch (error) {
       console.error('Failed to save energy profile:', error);
       toast.error('Failed to save energy profile');
-    }
-  };
-
-  const handleSaveSleep = async () => {
-    try {
-      const scheduleData = {
-        wake_time: wakeTime,
-        sleep_time: sleepTime,
-        wind_down_minutes: windDownMinutes,
-        preferred_end_time: preferredEndTime || null,
-      };
-      
-      // Save to backend
-      const savedSchedule = await profileService.saveSleepSchedule(scheduleData);
-      
-      // Update local state
-      setSleepSchedule(savedSchedule);
-      toast.success('Sleep schedule saved!');
-    } catch (error) {
-      console.error('Failed to save sleep schedule:', error);
-      toast.error('Failed to save sleep schedule');
     }
   };
 
@@ -569,6 +589,45 @@ export default function Settings() {
               <Save className="w-4 h-4 mr-2" />
               Save Profile
             </Button>
+
+            {/* Your data — export (portability) + deletion (erasure) */}
+            <div className="pt-6 border-t border-gray-200 space-y-4">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Your data</h2>
+                <p className="text-sm text-gray-600 mt-1">
+                  Download everything Taskly stores about you, or delete your account permanently.
+                </p>
+              </div>
+
+              <Button variant="secondary" onClick={handleExportData} disabled={exporting}>
+                <Download className="w-4 h-4 mr-2" />
+                {exporting ? 'Preparing…' : 'Export my data (JSON)'}
+              </Button>
+
+              <div className="rounded-apple border border-red-200 bg-red-50 p-4">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-red-900">Delete account</p>
+                    <p className="text-sm text-red-800 mt-1">
+                      Permanently deletes your account and every task, plan, project, sleep log and
+                      reflection. This cannot be undone.
+                    </p>
+                    <Button
+                      variant="danger"
+                      className="mt-3"
+                      onClick={() => {
+                        setDeleteConfirmText('');
+                        setDeleteModalOpen(true);
+                      }}
+                    >
+                      <Trash2 className="w-4 h-4 mr-2" />
+                      Delete my account
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
@@ -639,89 +698,6 @@ export default function Settings() {
             <Button variant="primary" onClick={handleSaveEnergy}>
               <Save className="w-4 h-4 mr-2" />
               Save Energy Profile
-            </Button>
-          </div>
-        )}
-
-        {/* Sleep Tab */}
-        {activeTab === 'sleep' && (
-          <div className="glass-card space-y-6">
-            <h2 className="text-lg font-semibold text-gray-900">Sleep Schedule</h2>
-            <p className="text-gray-600 -mt-4">
-              AI will respect your sleep schedule when planning tasks
-            </p>
-
-            <div className="grid sm:grid-cols-2 gap-4">
-              <Input
-                type="time"
-                label="Wake Up Time"
-                value={wakeTime}
-                onChange={(e) => setWakeTime(e.target.value)}
-                leftIcon={<Sun className="w-4 h-4" />}
-              />
-              <Input
-                type="time"
-                label="Sleep Time"
-                value={sleepTime}
-                onChange={(e) => setSleepTime(e.target.value)}
-                leftIcon={<Moon className="w-4 h-4" />}
-              />
-            </div>
-
-            {/* Wind Down Time */}
-            <div>
-              <label className="label">Wind Down Period (minutes)</label>
-              <p className="text-sm text-gray-600 mb-3">
-                Time before sleep when no demanding tasks should be scheduled
-              </p>
-              <div className="flex gap-2">
-                {[15, 30, 45, 60, 90].map((mins) => (
-                  <button
-                    key={mins}
-                    onClick={() => setWindDownMinutes(mins)}
-                    className={clsx(
-                      'flex-1 py-2 rounded-apple border text-sm font-medium transition-all',
-                      windDownMinutes === mins
-                        ? 'border-blue-500 bg-blue-500/10 text-blue-600'
-                        : 'border-gray-300 text-gray-700 hover:border-gray-400'
-                    )}
-                  >
-                    {mins}m
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Preferred End Time (hard cap for AI scheduler) */}
-            <div>
-              <label className="label">Done-by Time (optional)</label>
-              <p className="text-sm text-gray-600 mb-3">
-                Latest time the AI may schedule a task to end. Useful if you stay up late
-                but don't want work scheduled after a certain hour. Leave empty to use
-                sleep − wind-down.
-              </p>
-              <div className="flex items-center gap-3">
-                <Input
-                  type="time"
-                  value={preferredEndTime}
-                  onChange={(e) => setPreferredEndTime(e.target.value)}
-                  leftIcon={<Clock className="w-4 h-4" />}
-                  className="max-w-xs"
-                />
-                {preferredEndTime && (
-                  <button
-                    onClick={() => setPreferredEndTime('')}
-                    className="text-sm text-gray-500 hover:text-gray-700 underline"
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <Button variant="primary" onClick={handleSaveSleep}>
-              <Save className="w-4 h-4 mr-2" />
-              Save Sleep Schedule
             </Button>
           </div>
         )}
@@ -1376,6 +1352,57 @@ export default function Settings() {
               disabled={!newRecurringTask.name}
             >
               Add Recurring Task
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Delete account confirmation — typing the email is the guard against
+          an accidental irreversible click. */}
+      <Modal
+        isOpen={deleteModalOpen}
+        onClose={() => !deleting && setDeleteModalOpen(false)}
+        title="Delete your account?"
+      >
+        <div className="space-y-4">
+          <div className="flex items-start gap-3 p-3 rounded-lg bg-red-50 border border-red-200">
+            <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+            <div className="text-sm text-red-900 space-y-1">
+              <p className="font-medium">This is permanent and cannot be undone.</p>
+              <p>
+                Everything is deleted: tasks, daily plans, projects, backlog, sleep logs,
+                reflections, focus history and settings.
+              </p>
+            </div>
+          </div>
+
+          <p className="text-sm text-gray-700">
+            Consider exporting your data first. To confirm, type your email{' '}
+            <span className="font-medium text-gray-900">{user?.email}</span> below.
+          </p>
+
+          <Input
+            value={deleteConfirmText}
+            onChange={(e) => setDeleteConfirmText(e.target.value)}
+            placeholder={user?.email || 'your email'}
+            disabled={deleting}
+          />
+
+          <div className="flex gap-2 justify-end">
+            <Button
+              variant="ghost"
+              onClick={() => setDeleteModalOpen(false)}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={handleDeleteAccount}
+              disabled={deleting || deleteConfirmText.trim() !== (user?.email || '')}
+            >
+              <Trash2 className="w-4 h-4 mr-2" />
+              {deleting ? 'Deleting…' : 'Delete forever'}
             </Button>
           </div>
         </div>

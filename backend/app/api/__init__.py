@@ -7,8 +7,10 @@ from .data_routes import router as data_router
 from .recurring_routes import router as recurring_router
 from .backlog_routes import router as backlog_router
 from .project_routes import router as project_router
+from .account_routes import router as account_router
 
 __all__ = [
+    "account_router",
     "ai_router",
     "task_router",
     "plan_router",

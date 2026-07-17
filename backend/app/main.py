@@ -23,6 +23,7 @@ from app.api import (
     recurring_router,
     backlog_router,
     project_router,
+    account_router,
 )
 
 # Configure structured logging
@@ -179,6 +180,7 @@ app.include_router(data_router, prefix="/api/v1")
 app.include_router(recurring_router, prefix="/api/v1")
 app.include_router(backlog_router, prefix="/api/v1")
 app.include_router(project_router, prefix="/api/v1")
+app.include_router(account_router, prefix="/api/v1")
 
 
 # Health check endpoints

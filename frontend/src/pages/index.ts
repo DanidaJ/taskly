@@ -4,6 +4,7 @@ export { default as Schedule } from './Schedule';
 export { default as Reflection } from './Reflection';
 export { default as Settings } from './Settings';
 export { default as Auth } from './Auth';
+export { default as ResetPassword } from './ResetPassword';
 export { default as FocusTimer } from './FocusTimer';
 export { default as SleepTracker } from './SleepTracker';
 export { default as Analytics } from './Analytics';

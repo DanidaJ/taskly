@@ -19,7 +19,8 @@ import {
   Trash2,
 } from 'lucide-react';
 import { Button } from '@/components/ui';
-import { sleepEntryService, sleepGoalService, SleepGoal as SleepGoalDTO } from '@/services/api';
+import { sleepEntryService, sleepGoalService, SleepGoal as SleepGoalDTO, profileService } from '@/services/api';
+import { useUserProfileStore } from '@/stores';
 import { format, parseISO, startOfWeek, endOfWeek, eachDayOfInterval, subDays, addDays, isSameDay } from 'date-fns';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
@@ -55,6 +56,16 @@ export default function SleepTracker() {
   const navigate = useNavigate();
   const [entries, setEntries] = useState<SleepEntry[]>([]);
   const [goal, setGoal] = useState<SleepGoal>(DEFAULT_GOAL);
+  // The sleep SCHEDULE is the single source of truth (also drives the AI planner).
+  // Managed here so all sleep config lives in one place (was split with Settings).
+  const setSleepScheduleStore = useUserProfileStore((s) => s.setSleepSchedule);
+  const [schedule, setSchedule] = useState({
+    wakeTime: '07:00',
+    sleepTime: '23:00',
+    windDownMinutes: 30,
+    preferredEndTime: '',
+  });
+  const [savingSleep, setSavingSleep] = useState(false);
   const [showAddEntry, setShowAddEntry] = useState(false);
   const [editingEntry, setEditingEntry] = useState<SleepEntry | null>(null);
   const [isSavingEntry, setIsSavingEntry] = useState(false);
@@ -68,9 +79,8 @@ export default function SleepTracker() {
     notes: '',
   });
 
-  const [goalLoaded, setGoalLoaded] = useState(false);
 
-  // Load entries + goal from backend (single source of truth)
+  // Load entries + goal + schedule from backend (single source of truth)
   useEffect(() => {
     sleepGoalService.get()
       .then((g) => {
@@ -82,8 +92,22 @@ export default function SleepTracker() {
       })
       .catch((error) => {
         console.error('Failed to load sleep goal:', error);
+      });
+
+    profileService.getSleepSchedule()
+      .then((s: any) => {
+        if (s) {
+          setSchedule({
+            wakeTime: s.wake_time || '07:00',
+            sleepTime: s.sleep_time || '23:00',
+            windDownMinutes: s.wind_down_minutes ?? 30,
+            preferredEndTime: s.preferred_end_time || '',
+          });
+        }
       })
-      .finally(() => setGoalLoaded(true));
+      .catch((error) => {
+        console.error('Failed to load sleep schedule:', error);
+      });
 
     sleepEntryService.getAll()
       .then((backendEntries: any[]) => {
@@ -103,18 +127,42 @@ export default function SleepTracker() {
       });
   }, []);
 
-  // Persist goal changes to backend
-  useEffect(() => {
-    if (!goalLoaded) return;
-    const payload: SleepGoalDTO = {
-      target_bedtime: goal.targetBedtime,
-      target_wake_time: goal.targetWakeTime,
-      target_duration_hours: goal.targetDuration,
-    };
-    sleepGoalService.save(payload).catch((error) => {
-      console.error('Failed to save sleep goal:', error);
-    });
-  }, [goal, goalLoaded]);
+  // Save the whole sleep config from one editor. The wake/sleep times entered
+  // here are the ONLY place they live — they drive the AI planner (sleep
+  // schedule) and are mirrored into the goal so its charts can never drift.
+  const saveSleepConfig = async () => {
+    setSavingSleep(true);
+    try {
+      const savedSchedule = await profileService.saveSleepSchedule({
+        wake_time: schedule.wakeTime,
+        sleep_time: schedule.sleepTime,
+        wind_down_minutes: schedule.windDownMinutes,
+        preferred_end_time: schedule.preferredEndTime || null,
+      });
+      // Keep the app-wide store in sync so the AI planner uses the new times.
+      setSleepScheduleStore(savedSchedule);
+
+      const goalPayload: SleepGoalDTO = {
+        target_bedtime: schedule.sleepTime,
+        target_wake_time: schedule.wakeTime,
+        target_duration_hours: goal.targetDuration,
+      };
+      await sleepGoalService.save(goalPayload);
+      setGoal((prev) => ({
+        ...prev,
+        targetBedtime: schedule.sleepTime,
+        targetWakeTime: schedule.wakeTime,
+      }));
+
+      setShowGoalSettings(false);
+      toast.success('Sleep settings saved!');
+    } catch (error) {
+      console.error('Failed to save sleep settings:', error);
+      toast.error('Failed to save sleep settings');
+    } finally {
+      setSavingSleep(false);
+    }
+  };
 
   const calculateDuration = (bedtime: string, wakeTime: string): number => {
     const [bedHour, bedMin] = bedtime.split(':').map(Number);
@@ -336,7 +384,7 @@ export default function SleepTracker() {
             size="sm"
             onClick={() => setShowGoalSettings(!showGoalSettings)}
           >
-            Set Goals
+            Sleep schedule
           </Button>
           <Button
             variant="primary"
@@ -692,36 +740,91 @@ export default function SleepTracker() {
               className="glass-card w-full max-w-md"
               onClick={(e) => e.stopPropagation()}
             >
-              <h3 className="text-xl font-semibold text-gray-900 mb-4">Sleep Goals</h3>
-              
+              <h3 className="text-xl font-semibold text-gray-900 mb-1">Sleep schedule &amp; goal</h3>
+              <p className="text-sm text-gray-600 mb-4">
+                These times are also what the AI planner uses to know when you're awake.
+              </p>
+
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="text-sm text-gray-700 block mb-1">Target Bedtime</label>
+                    <label className="text-sm text-gray-700 block mb-1">Wake up time</label>
                     <input
                       type="time"
-                      value={goal.targetBedtime}
-                      onChange={(e) => setGoal(prev => ({ ...prev, targetBedtime: e.target.value }))}
+                      value={schedule.wakeTime}
+                      onChange={(e) => setSchedule((p) => ({ ...p, wakeTime: e.target.value }))}
                       className="w-full bg-white border border-gray-300 rounded-apple px-3 py-2 text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     />
                   </div>
                   <div>
-                    <label className="text-sm text-gray-700 block mb-1">Target Wake Time</label>
+                    <label className="text-sm text-gray-700 block mb-1">Sleep time</label>
                     <input
                       type="time"
-                      value={goal.targetWakeTime}
-                      onChange={(e) => setGoal(prev => ({ ...prev, targetWakeTime: e.target.value }))}
+                      value={schedule.sleepTime}
+                      onChange={(e) => setSchedule((p) => ({ ...p, sleepTime: e.target.value }))}
                       className="w-full bg-white border border-gray-300 rounded-apple px-3 py-2 text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label className="text-sm text-gray-700 block mb-1">Target Sleep Duration (hours)</label>
+                  <label className="text-sm text-gray-700 block mb-1">
+                    Wind-down before sleep (minutes)
+                  </label>
+                  <div className="flex gap-2">
+                    {[15, 30, 45, 60, 90].map((mins) => (
+                      <button
+                        key={mins}
+                        type="button"
+                        onClick={() => setSchedule((p) => ({ ...p, windDownMinutes: mins }))}
+                        className={clsx(
+                          'flex-1 py-2 rounded-apple border text-sm font-medium transition-all',
+                          schedule.windDownMinutes === mins
+                            ? 'border-blue-500 bg-blue-500/10 text-blue-600'
+                            : 'border-gray-300 text-gray-700 hover:border-gray-400'
+                        )}
+                      >
+                        {mins}m
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-sm text-gray-700 block mb-1">Done-by time (optional)</label>
+                  <p className="text-xs text-gray-500 mb-2">
+                    Latest the AI may schedule a task to end. Leave empty to use sleep − wind-down.
+                  </p>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="time"
+                      value={schedule.preferredEndTime}
+                      onChange={(e) => setSchedule((p) => ({ ...p, preferredEndTime: e.target.value }))}
+                      className="flex-1 bg-white border border-gray-300 rounded-apple px-3 py-2 text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    />
+                    {schedule.preferredEndTime && (
+                      <button
+                        type="button"
+                        onClick={() => setSchedule((p) => ({ ...p, preferredEndTime: '' }))}
+                        className="text-sm text-gray-500 hover:text-gray-700 underline"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-gray-200">
+                  <label className="text-sm text-gray-700 block mb-1">
+                    Target sleep duration (hours)
+                  </label>
+                  <p className="text-xs text-gray-500 mb-2">
+                    Just for your sleep tracking charts — how much sleep you're aiming for.
+                  </p>
                   <input
                     type="number"
                     value={goal.targetDuration}
-                    onChange={(e) => setGoal(prev => ({ ...prev, targetDuration: parseFloat(e.target.value) || 8 }))}
+                    onChange={(e) => setGoal((prev) => ({ ...prev, targetDuration: parseFloat(e.target.value) || 8 }))}
                     className="w-full bg-white border border-gray-300 rounded-apple px-3 py-2 text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     min="4"
                     max="12"
@@ -732,12 +835,10 @@ export default function SleepTracker() {
                 <Button
                   variant="primary"
                   className="w-full"
-                  onClick={() => {
-                    setShowGoalSettings(false);
-                    toast.success('Sleep goals updated!');
-                  }}
+                  onClick={saveSleepConfig}
+                  isLoading={savingSleep}
                 >
-                  Save Goals
+                  Save
                 </Button>
               </div>
             </motion.div>

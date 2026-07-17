@@ -12,9 +12,15 @@ interface AuthStore extends AuthState {
     fullName?: string,
   ) => Promise<{ needsEmailConfirmation: boolean; alreadyRegistered: boolean }>;
   resendConfirmation: (email: string) => Promise<void>;
+  requestPasswordReset: (email: string) => Promise<void>;
+  updatePassword: (newPassword: string) => Promise<void>;
   signOut: () => Promise<void>;
   updateUser: (updates: Partial<User>) => void;
 }
+
+// Where Supabase sends the user after they click the reset link. This exact URL
+// must be allow-listed in Supabase → Authentication → URL Configuration.
+export const PASSWORD_RESET_REDIRECT = '/app/reset-password';
 
 export const useAuthStore = create<AuthStore>()(
   persist(
@@ -194,6 +200,20 @@ export const useAuthStore = create<AuthStore>()(
         // No emailRedirectTo — use the project's existing Site URL config, which
         // is what the (already working) confirmation emails use.
         const { error } = await supabase.auth.resend({ type: 'signup', email });
+        if (error) throw error;
+      },
+
+      requestPasswordReset: async (email: string) => {
+        const { error } = await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo: `${window.location.origin}${PASSWORD_RESET_REDIRECT}`,
+        });
+        if (error) throw error;
+      },
+
+      // Called from the reset page. Supabase puts the recovery token in the URL
+      // and establishes a temporary session, so updateUser can set the password.
+      updatePassword: async (newPassword: string) => {
+        const { error } = await supabase.auth.updateUser({ password: newPassword });
         if (error) throw error;
       },
 

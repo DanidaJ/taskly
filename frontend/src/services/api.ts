@@ -805,4 +805,21 @@ export const projectService = {
   },
 };
 
+// ============================================
+// Account Service (GDPR export + deletion)
+// ============================================
+
+export const accountService = {
+  /** Full JSON export of everything we store for the current user. */
+  async exportData(): Promise<any> {
+    const response = await api.get('/account/export');
+    return response.data;
+  },
+
+  /** Permanently delete the current user's account and all their data. */
+  async deleteAccount(): Promise<void> {
+    await api.delete('/account');
+  },
+};
+
 export default api;

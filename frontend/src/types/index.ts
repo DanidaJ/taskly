@@ -52,6 +52,11 @@ export interface PlannedTask {
   project_id?: string | null;
   project_subtask_id?: string | null;
   logged_hours?: number;
+  // The AI's cognitive classification, used for energy-aware scheduling + colour.
+  cognitive_load?: CognitiveLoad;
+  // The task's real calendar date (YYYY-MM-DD). Manual tasks: the plan's date;
+  // AI stamps past-midnight blocks. Drives reminders + missed detection.
+  scheduled_date?: string;
 }
 
 // Daily plan
@@ -75,6 +80,8 @@ export interface AIPlanResponse {
     notes?: string;
     scheduled_start?: string;
     scheduled_end?: string;
+    cognitive_load?: CognitiveLoad;
+    scheduled_date?: string;
   }[];
   recommendations: string[];
 }

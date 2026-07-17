@@ -72,8 +72,8 @@ export default function Analytics() {
   // Backend-synced data caches
   const [backendFocusData, setBackendFocusData] = useState<Record<string, FocusSession[]>>({});
   const [backendSleepData, setBackendSleepData] = useState<SleepEntry[]>([]);
-  const [backendStatsData, setBackendStatsData] = useState<Record<string, { completed: number; total: number; missed: number; skipped: number; focus_minutes: number }>>({});
-  const [prevWeekStatsData, setPrevWeekStatsData] = useState<Record<string, { completed: number; missed: number; skipped: number; focus_minutes: number }>>({});
+  const [backendStatsData, setBackendStatsData] = useState<Record<string, { completed: number; total: number; missed: number; skipped: number }>>({});
+  const [prevWeekStatsData, setPrevWeekStatsData] = useState<Record<string, { completed: number; missed: number; skipped: number }>>({});
 
   const weekDays = useMemo(() => {
     const start = startOfWeek(selectedWeek, { weekStartsOn: 1 });
@@ -117,7 +117,6 @@ export default function Analytics() {
             total: s.tasks_total,
             missed: s.tasks_missed,
             skipped: s.tasks_skipped,
-            focus_minutes: s.focus_minutes,
           };
         }
         setBackendStatsData(mapped);
@@ -133,13 +132,12 @@ export default function Analytics() {
     const prevEnd = format(endOfWeek(subWeeks(selectedWeek, 1), { weekStartsOn: 1 }), 'yyyy-MM-dd');
     import('@/services/api').then(({ dailyStatsService }) => {
       dailyStatsService.getForDateRange(prevStart, prevEnd).then((stats: any[]) => {
-        const mapped: Record<string, { completed: number; missed: number; skipped: number; focus_minutes: number }> = {};
+        const mapped: Record<string, { completed: number; missed: number; skipped: number }> = {};
         for (const s of stats) {
           mapped[s.date] = {
             completed: s.tasks_completed,
             missed: s.tasks_missed,
             skipped: s.tasks_skipped ?? 0,
-            focus_minutes: s.focus_minutes,
           };
         }
         setPrevWeekStatsData(mapped);

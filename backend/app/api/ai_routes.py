@@ -53,7 +53,8 @@ async def update_plan(
     Update an existing plan based on user modifications.
     """
     try:
-        return await ai_service.update_plan(payload)
+        user_tz = await get_user_timezone(current_user["user_id"])
+        return await ai_service.update_plan(payload, user_tz)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

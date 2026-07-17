@@ -385,6 +385,24 @@ class ScheduleService:
                 return True
         return False
 
+    def _day_order_minutes(self, scheduled_start, wake_time: str) -> int:
+        """Minutes since wake time for ordering. Rotating the clock so wake=0
+        makes a post-midnight task (00:30) sort AFTER a 23:00 task on a night-owl
+        day — a plain 'HH:MM' string sort gets this backwards. Unscheduled tasks
+        sort last."""
+        if not scheduled_start:
+            return 10 ** 9
+        try:
+            h, m = map(int, str(scheduled_start)[:5].split(':'))
+        except (ValueError, AttributeError):
+            return 10 ** 9
+        try:
+            wt = self.parse_time(wake_time)
+            wake_min = wt.hour * 60 + wt.minute
+        except Exception:
+            wake_min = 0
+        return ((h * 60 + m) - wake_min) % (24 * 60)
+
     def enforce_timing(
         self,
         planned_tasks: List[PlannedTask],
@@ -482,6 +500,8 @@ class ScheduleService:
                 continue
             accepted_intervals.append(interval)
             accepted_fixed_ids.add(id(task))
+            # Record the real calendar date of the accepted fixed block.
+            task.scheduled_date = interval[0].date().isoformat()
 
         # Build final lists in the ORIGINAL order; clear times on demoted tasks.
         fixed_tasks = []
@@ -529,41 +549,41 @@ class ScheduleService:
                 include_breaks=True
             )
             
-            # Combine fixed and scheduled tasks
+            # Combine fixed and scheduled tasks, ordered by real day time so a
+            # post-midnight task sorts after a 23:00 one (not before it).
             all_tasks = fixed_tasks + scheduled_tasks
-            
-            # Sort by scheduled time
-            all_tasks.sort(key=lambda t: t.scheduled_start if t.scheduled_start else '99:99')
-            
+            all_tasks.sort(key=lambda t: self._day_order_minutes(t.scheduled_start, sleep_schedule.wake_time))
+
             logger.info("✨ Smart scheduling completed",
                        fixed_count=len(fixed_tasks),
                        scheduled_count=len([t for t in scheduled_tasks if t.scheduled_start]),
                        break_count=len([t for t in scheduled_tasks if getattr(t, 'is_break', False)]))
-            
+
             logger.info("=" * 60)
             return all_tasks
-            
+
         except Exception as e:
             logger.error("Smart scheduling failed, using fallback",
                         error=str(e),
                         exc_info=True)
-        
-        # FALLBACK: Original priority-based scheduling
-        # Sort tasks by priority (high priority first)
+
+        # FALLBACK: simple priority-based placement. Only the FLEXIBLE tasks are
+        # (re)placed — the accepted fixed-time tasks keep their user-intended
+        # slots instead of being trampled (a "meeting at 15:00" must not move).
         sorted_tasks = sorted(
-            planned_tasks, 
+            flexible_tasks,
             key=lambda t: (
-                0 if t.priority == Priority.HIGH else 
+                0 if t.priority == Priority.HIGH else
                 1 if t.priority == Priority.MEDIUM else 2,
                 t.order
             )
         )
-        
+
         # Schedule tasks
         scheduled_tasks = []
         current_slot_idx = 0
         current_time = available_slots[0][0] if available_slots else None
-        
+
         for task in sorted_tasks:
             if current_slot_idx >= len(available_slots):
                 logger.warning(f"❌ No available slots for task: {task.task_name}")
@@ -591,6 +611,7 @@ class ScheduleService:
                     # Task fits in this slot
                     task.scheduled_start = task_start.strftime('%H:%M')
                     task.scheduled_end = task_end.strftime('%H:%M')
+                    task.scheduled_date = task_start.date().isoformat()
                     logger.info(f"✅ Scheduled '{task.task_name}' at {task.scheduled_start}-{task.scheduled_end}")
                     
                     current_time = task_end
@@ -606,14 +627,14 @@ class ScheduleService:
                 logger.warning(f"❌ Could not schedule '{task.task_name}' - no slots with enough time")
             
             scheduled_tasks.append(task)
-        
-        # Re-sort by scheduled time for display
-        scheduled_tasks.sort(
-            key=lambda t: t.scheduled_start if t.scheduled_start else '99:99'
-        )
-        
+
+        # Re-attach the untouched fixed-time tasks and order everything by real
+        # day time (post-midnight tasks last, unscheduled ones after that).
+        all_tasks = fixed_tasks + scheduled_tasks
+        all_tasks.sort(key=lambda t: self._day_order_minutes(t.scheduled_start, sleep_schedule.wake_time))
+
         logger.info("=" * 60)
-        return scheduled_tasks
+        return all_tasks
     
     def check_sleep_protection(
         self,
@@ -669,10 +690,17 @@ class ScheduleService:
         if not scheduled_tasks:
             return {"message": "No tasks scheduled"}
         
-        scheduled = [t for t in scheduled_tasks if t.scheduled_start]
+        # Order by real day time so "first"/"last" are correct across midnight.
+        scheduled = sorted(
+            [t for t in scheduled_tasks if t.scheduled_start],
+            key=lambda t: self._day_order_minutes(t.scheduled_start, sleep_schedule.wake_time),
+        )
         unscheduled = [t for t in scheduled_tasks if not t.scheduled_start]
-        
-        last_task = max(scheduled, key=lambda t: t.scheduled_end) if scheduled else None
+
+        last_task = max(
+            scheduled,
+            key=lambda t: self._day_order_minutes(t.scheduled_end, sleep_schedule.wake_time),
+        ) if scheduled else None
         wind_down_deadline = self.calculate_sleep_deadline(sleep_schedule, base_date)
         
         summary = {
