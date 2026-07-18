@@ -133,6 +133,52 @@ export function capitalizeFirst(str: string): string {
   return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
+export type ManualTimingState = 'future' | 'ongoing' | 'past';
+
+export interface ManualTiming {
+  state: ManualTimingState;
+  startDt: Date;
+  endDt: Date;
+}
+
+/**
+ * Classify a manually-scheduled task by its window relative to now (the device
+ * clock, which is the user's real local time). Gates on the END, not the start:
+ * a task whose start has passed but whose end is still ahead is legitimately
+ * *ongoing*, not "in the past".
+ *
+ * The end is derived from start + duration (absolute ms), which is inherently
+ * cross-midnight-safe — a 23:00 task + 2h ends at 01:00 the next day, and a
+ * 23:30 task added at 23:40 is still 'ongoing' even though the clock rolled over.
+ *
+ *  - 'past'    : whole window already over (end <= now) — a pending task here is
+ *                born missed; the caller should block it.
+ *  - 'ongoing' : started but not finished (start <= now < end) — a real task
+ *                entered late; the caller should create it in-progress.
+ *  - 'future'  : hasn't started yet — normal.
+ *
+ * Returns null if the inputs are missing/unparseable (caller treats as no gate).
+ */
+export function classifyManualTiming(
+  dateStr: string,
+  startHHMM: string,
+  durationMinutes: number,
+  now: Date = new Date()
+): ManualTiming | null {
+  if (!dateStr || !startHHMM) return null;
+  const startDt = new Date(`${dateStr}T${startHHMM}:00`);
+  if (Number.isNaN(startDt.getTime())) return null;
+  const dur = Number.isFinite(durationMinutes) && durationMinutes > 0 ? durationMinutes : 30;
+  const endDt = new Date(startDt.getTime() + dur * 60_000);
+
+  let state: ManualTimingState;
+  if (endDt.getTime() <= now.getTime()) state = 'past';
+  else if (startDt.getTime() <= now.getTime()) state = 'ongoing';
+  else state = 'future';
+
+  return { state, startDt, endDt };
+}
+
 export function pluralize(count: number, singular: string, plural?: string): string {
   return count === 1 ? singular : (plural || `${singular}s`);
 }

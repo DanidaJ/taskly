@@ -19,6 +19,7 @@ import {
 import { useState, useEffect } from 'react';
 import { useAuthStore } from '@/stores/authStore';
 import { useTaskStore } from '@/stores';
+import { usePageMeta } from '@/hooks/usePageMeta';
 import { clsx } from 'clsx';
 import QuickCapture from './QuickCapture';
 import MiniFocusCountdown from './MiniFocusCountdown';
@@ -42,6 +43,8 @@ export default function Layout() {
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
   const { user, signOut } = useAuthStore();
   const location = useLocation();
+  const currentPage = navigation.find((item) => item.href === location.pathname);
+  usePageMeta(`${currentPage?.name ?? 'Dashboard'} — Taskly`);
   const checkMissedTasks = useTaskStore((state) => state.checkMissedTasks);
 
   // Keyboard shortcut for quick capture

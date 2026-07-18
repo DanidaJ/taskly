@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '@/stores/authStore';
 import { useUserProfileStore } from '@/stores/userProfileStore';
 import { useUserPatternsStore } from '@/stores/userPatternsStore';
@@ -14,13 +14,23 @@ import FocusTimer from '@/pages/FocusTimer';
 import SleepTracker from '@/pages/SleepTracker';
 import Analytics from '@/pages/Analytics';
 import Backlog from '@/pages/Backlog';
-import { Home, Features, HowItWorks, About } from '@/pages/landing';
+import { Home, Features, HowItWorks, About, PrivacyPolicy, Terms } from '@/pages/landing';
 import { useEffect } from 'react';
 import toast from 'react-hot-toast';
 import {
   ensureFcmTokenRegistered,
   onForegroundMessage,
 } from '@/services/firebase';
+
+// Reset scroll to the top whenever the route changes, so a new page never
+// opens partway down at the previous page's scroll position.
+function ScrollToTop() {
+  const { pathname } = useLocation();
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [pathname]);
+  return null;
+}
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading, user } = useAuthStore();
@@ -90,12 +100,15 @@ function App() {
 
   return (
     <BrowserRouter>
+      <ScrollToTop />
       <Routes>
         {/* Landing Pages */}
         <Route path="/" element={<Home />} />
         <Route path="/features" element={<Features />} />
         <Route path="/how-it-works" element={<HowItWorks />} />
         <Route path="/about" element={<About />} />
+        <Route path="/privacy" element={<PrivacyPolicy />} />
+        <Route path="/terms" element={<Terms />} />
 
         {/* App Routes */}
         <Route path="/app/auth" element={<Auth />} />

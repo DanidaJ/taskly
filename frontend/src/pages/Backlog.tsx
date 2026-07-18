@@ -18,6 +18,7 @@ import { useBacklogStore } from '@/stores';
 import { Button, Input, Textarea, Modal, DatePicker, TimePicker } from '@/components/ui';
 import { PriorityBadge } from '@/components/ui/Badge';
 import { clsx } from 'clsx';
+import { classifyManualTiming } from '@/utils';
 import type { BacklogItem } from '@/services/api';
 import ProjectsPanel from '@/components/projects/ProjectsPanel';
 
@@ -513,6 +514,16 @@ function ScheduleModal({
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Don't let a timed slot land entirely in the past (it'd be born missed).
+    if (includeTime && time) {
+      const t = classifyManualTiming(date, time, item.estimated_minutes);
+      if (t?.state === 'past') {
+        toast.error("That time slot has already ended. Pick a later time (or schedule for the future).");
+        return;
+      }
+    }
+
     setScheduling(true);
     await onSchedule({
       date,

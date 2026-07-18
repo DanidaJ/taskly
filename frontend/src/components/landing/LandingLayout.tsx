@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   Brain,
   Menu,
@@ -98,7 +98,8 @@ export function LandingLayout({ children }: LandingLayoutProps) {
         </div>
 
         {/* Mobile Navigation */}
-        {mobileMenuOpen && (
+        <AnimatePresence>
+          {mobileMenuOpen && (
           <motion.div
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
@@ -137,7 +138,8 @@ export function LandingLayout({ children }: LandingLayoutProps) {
               </div>
             </div>
           </motion.div>
-        )}
+          )}
+        </AnimatePresence>
       </nav>
 
       {/* Main Content */}
@@ -175,7 +177,7 @@ export function LandingLayout({ children }: LandingLayoutProps) {
             {/* Social Links */}
             <div className="flex items-center gap-4">
               <a
-                href="#"
+                href="https://danidajay.com"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-gray-600 hover:text-blue-600 transition-colors"
@@ -184,7 +186,7 @@ export function LandingLayout({ children }: LandingLayoutProps) {
                 <Globe className="w-5 h-5" />
               </a>
               <a
-                href="#"
+                href="https://www.instagram.com/danida_j/"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-gray-600 hover:text-pink-600 transition-colors"
@@ -193,7 +195,7 @@ export function LandingLayout({ children }: LandingLayoutProps) {
                 <Instagram className="w-5 h-5" />
               </a>
               <a
-                href="#"
+                href="https://www.linkedin.com/in/danida-jayakody-52a884200/"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-gray-600 hover:text-blue-600 transition-colors"
@@ -204,10 +206,24 @@ export function LandingLayout({ children }: LandingLayoutProps) {
             </div>
           </div>
 
-          {/* Bottom Row - Copyright Centered */}
-          <div className="pt-8 border-t border-gray-200 flex flex-col items-center gap-2 text-center">
+          {/* Bottom Row - Legal + Copyright */}
+          <div className="pt-8 border-t border-gray-200 flex flex-col items-center gap-3 text-center">
+            <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-sm">
+              <Link to="/privacy" className="text-gray-600 hover:text-gray-900 transition-colors">
+                Privacy Policy
+              </Link>
+              <Link to="/terms" className="text-gray-600 hover:text-gray-900 transition-colors">
+                Terms of Service
+              </Link>
+              <a
+                href="mailto:jayakodydanida@gmail.com"
+                className="text-gray-600 hover:text-gray-900 transition-colors"
+              >
+                Contact
+              </a>
+            </div>
             <p className="text-sm text-gray-600">
-              © 2025 <span className="gradient-text-blue font-medium">Nerdtastic🧠™</span> by Danida Jayakody
+              © {new Date().getFullYear()} <span className="gradient-text-blue font-medium">Nerdtastic🧠™</span> by Danida Jayakody
             </p>
             <p className="text-xs text-gray-500">
               Taskly is a project by Nerdtastic🧠™ | All rights reserved.

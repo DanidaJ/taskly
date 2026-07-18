@@ -3,11 +3,13 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Sparkles, Mail, Lock, User, ArrowRight, MailCheck, ArrowLeft } from 'lucide-react';
 import { useAuthStore } from '@/stores';
 import { Button, Input } from '@/components/ui';
+import { usePageMeta } from '@/hooks/usePageMeta';
 import toast from 'react-hot-toast';
 
 const MIN_PASSWORD_LENGTH = 8;
 
 export default function Auth() {
+  usePageMeta('Sign In — Taskly', 'Sign in or create your Taskly account to start planning your day around your energy.');
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [view, setView] = useState<'form' | 'verify'>('form');
   const [email, setEmail] = useState('');

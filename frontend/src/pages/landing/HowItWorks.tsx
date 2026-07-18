@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { LandingLayout } from '../../components/landing/LandingLayout';
+import { usePageMeta } from '../../hooks/usePageMeta';
 
 const steps = [
   {
@@ -139,6 +140,10 @@ const faqs = [
 ];
 
 export function HowItWorks() {
+  usePageMeta(
+    'How It Works — Taskly',
+    'From brain-dump to a schedule built around your energy: see how Taskly turns your tasks into an AI-planned day in a few simple steps.',
+  );
   return (
     <LandingLayout>
       {/* Header */}
@@ -389,7 +394,7 @@ export function HowItWorks() {
               Ready to Get Started?
             </h2>
             <p className="text-lg text-gray-600 mb-8">
-              Join thousands who've simplified their planning with AI.
+              Be one of the first to plan with Taskly — free during beta.
             </p>
             <Link
               to="/app/auth"

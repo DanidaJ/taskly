@@ -7,15 +7,15 @@ import {
   Zap,
   Calendar,
   MessageSquare,
-  Bell,
+  Inbox,
   Target,
-  Lightbulb,
   RefreshCw,
   Shield,
   ArrowRight,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { LandingLayout } from '../../components/landing/LandingLayout';
+import { usePageMeta } from '../../hooks/usePageMeta';
 
 const mainFeatures = [
   {
@@ -76,32 +76,32 @@ const additionalFeatures = [
   {
     icon: Calendar,
     title: 'Smart Schedule',
-    description: 'Visual calendar with drag-and-drop, auto-adjusting blocks',
+    description: 'A visual day and week calendar with color-coded, energy-aware time blocks.',
+  },
+  {
+    icon: Inbox,
+    title: 'Backlog',
+    description: "A home for everything you're not doing yet — capture now, schedule when you're ready.",
+  },
+  {
+    icon: Target,
+    title: 'Projects with Pacing',
+    description: 'Break bigger goals into hours and let Taskly pace the work across your week.',
+  },
+  {
+    icon: RefreshCw,
+    title: 'Recurring Routines',
+    description: 'Repeating tasks and routines that flow into your plan automatically.',
+  },
+  {
+    icon: Zap,
+    title: 'Quick Capture',
+    description: 'Add a task from anywhere in seconds with the ⌘K quick-capture shortcut.',
   },
   {
     icon: MessageSquare,
     title: 'Daily Reflection',
-    description: 'End-of-day prompts to review and improve habits',
-  },
-  {
-    icon: Bell,
-    title: 'Smart Notifications',
-    description: 'Contextual reminders that respect your focus time',
-  },
-  {
-    icon: Target,
-    title: 'Goal Setting',
-    description: 'Set and track daily, weekly, and monthly objectives',
-  },
-  {
-    icon: Lightbulb,
-    title: 'Morning Briefing',
-    description: 'AI-generated daily overview and priorities',
-  },
-  {
-    icon: RefreshCw,
-    title: 'Quick Capture',
-    description: 'Instantly add tasks from anywhere in the app',
+    description: "End-of-day prompts to review your day and tune tomorrow's plan.",
   },
 ];
 
@@ -133,6 +133,10 @@ const colorClasses = {
 };
 
 export function Features() {
+  usePageMeta(
+    'Features — Taskly',
+    'Energy-aware AI scheduling, focus sessions, sleep tracking, and analytics — every Taskly feature that helps you work with your natural rhythm, not against it.',
+  );
   return (
     <LandingLayout>
       {/* Header */}

@@ -4,6 +4,7 @@ import { motion } from 'framer-motion';
 import { KeyRound, Loader2, CheckCircle2, AlertTriangle } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { Button, Input } from '@/components/ui';
+import { usePageMeta } from '@/hooks/usePageMeta';
 import { useAuthStore } from '@/stores';
 import { supabase } from '@/services/supabase';
 
@@ -17,6 +18,7 @@ const MIN_PASSWORD_LENGTH = 8;
  * cannot possibly work.
  */
 export default function ResetPassword() {
+  usePageMeta('Reset Password — Taskly');
   const navigate = useNavigate();
   const updatePassword = useAuthStore((s) => s.updatePassword);
 

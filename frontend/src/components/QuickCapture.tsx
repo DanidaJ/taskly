@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plus, X, Send, Calendar, Inbox } from 'lucide-react';
+import { Plus, X, Send, Calendar, Inbox, AlertTriangle } from 'lucide-react';
 import { DatePicker, TimePicker } from '@/components/ui';
 import { useTaskStore, useBacklogStore } from '@/stores';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
 import { planService } from '@/services/api';
+import { classifyManualTiming } from '@/utils';
 import { format } from 'date-fns';
 
 interface QuickCaptureProps {
@@ -30,6 +31,7 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('medium');
   const [dueDate, setDueDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
   const [scheduledTime, setScheduledTime] = useState(() => format(new Date(), 'HH:mm'));
+  const [ongoingConfirm, setOngoingConfirm] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const { currentPlan, plansByDate, loadPlanFromDatabase } = useTaskStore();
@@ -48,12 +50,66 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
     }
   }, [isOpen]);
 
-  const isTimeInPast = (): boolean => {
-    if (mode !== 'schedule') return false;
-    if (!scheduledTime || !dueDate) return false;
-    const selectedDateTime = new Date(`${dueDate}T${scheduledTime}`);
-    const now = new Date();
-    return selectedDateTime < new Date(now.getTime() - 2 * 60 * 60 * 1000);
+  // Build + save the scheduled task with the given status. 'in_progress' is used
+  // for a task that's already underway (start passed, end still ahead).
+  const createScheduledTask = async (status: 'pending' | 'in_progress') => {
+    let scheduled_start: string | undefined;
+    let scheduled_end: string | undefined;
+
+    if (scheduledTime) {
+      scheduled_start = scheduledTime;
+      const durationMinutes = parseInt(duration) || 60;
+      const [hours, mins] = scheduledTime.split(':').map(Number);
+      const endTimeMinutes = hours * 60 + mins + durationMinutes;
+      const endHours = Math.floor(endTimeMinutes / 60) % 24;
+      const endMins = endTimeMinutes % 60;
+      scheduled_end = `${String(endHours).padStart(2, '0')}:${String(endMins).padStart(2, '0')}`;
+    }
+
+    const today = dueDate;
+    const existingTasksForDate = plansByDate[today]?.tasks ||
+      (currentPlan?.date === today ? currentPlan.tasks || [] : []);
+
+    const plannedTaskEntry = {
+      id: `planned-${Date.now()}`,
+      task_id: '',
+      task_name: taskName,
+      suggested_duration: `${duration} minutes`,
+      priority: priority as 'low' | 'medium' | 'high',
+      notes: undefined,
+      scheduled_start,
+      scheduled_end,
+      status,
+      order: existingTasksForDate.length,
+    };
+
+    const planToSave = {
+      date: today,
+      is_ai_generated: false,
+      tasks: [...existingTasksForDate, plannedTaskEntry],
+    };
+
+    const savedPlan = await planService.save(planToSave);
+
+    if (savedPlan) {
+      useTaskStore.setState((state) => {
+        const updatedPlansByDate = {
+          ...state.plansByDate,
+          [today]: savedPlan,
+        };
+        const allTasks = Object.values(updatedPlansByDate).flatMap((plan) => plan.tasks || []);
+        return {
+          currentPlan: savedPlan,
+          plansByDate: updatedPlansByDate,
+          plannedTasks: allTasks,
+        };
+      });
+    } else {
+      await loadPlanFromDatabase(today);
+    }
+
+    toast.success(status === 'in_progress' ? 'Task added — marked in progress.' : 'Task added!');
+    onClose?.();
   };
 
   const handleSubmit = async (e?: React.FormEvent) => {
@@ -61,11 +117,6 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
 
     if (!taskName || taskName.length < 2) {
       toast.error('Please enter a task name');
-      return;
-    }
-
-    if (isTimeInPast()) {
-      toast.error('Cannot schedule a task more than 2 hours in the past.');
       return;
     }
 
@@ -85,64 +136,20 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
         return;
       }
 
-      // Schedule path
-      let scheduled_start: string | undefined;
-      let scheduled_end: string | undefined;
-
-      if (scheduledTime) {
-        scheduled_start = scheduledTime;
-        const durationMinutes = parseInt(duration) || 60;
-        const [hours, mins] = scheduledTime.split(':').map(Number);
-        const endTimeMinutes = hours * 60 + mins + durationMinutes;
-        const endHours = Math.floor(endTimeMinutes / 60) % 24;
-        const endMins = endTimeMinutes % 60;
-        scheduled_end = `${String(endHours).padStart(2, '0')}:${String(endMins).padStart(2, '0')}`;
+      // Gate on the task's window (computed fresh at submit time). A slot that's
+      // entirely in the past is born missed → block it. A task that's still
+      // running needs an explicit "add as in-progress" confirmation.
+      const t = classifyManualTiming(dueDate, scheduledTime, parseInt(duration, 10) || 60);
+      if (t?.state === 'past') {
+        toast.error("That time slot has already ended. Pick a time that isn't fully in the past, or add it to your backlog.");
+        return;
+      }
+      if (t?.state === 'ongoing') {
+        setOngoingConfirm(true);
+        return;
       }
 
-      const today = dueDate;
-      const existingTasksForDate = plansByDate[today]?.tasks ||
-        (currentPlan?.date === today ? currentPlan.tasks || [] : []);
-
-      const plannedTaskEntry = {
-        id: `planned-${Date.now()}`,
-        task_id: '',
-        task_name: taskName,
-        suggested_duration: `${duration} minutes`,
-        priority: priority as 'low' | 'medium' | 'high',
-        notes: undefined,
-        scheduled_start,
-        scheduled_end,
-        status: 'pending' as const,
-        order: existingTasksForDate.length,
-      };
-
-      const planToSave = {
-        date: today,
-        is_ai_generated: false,
-        tasks: [...existingTasksForDate, plannedTaskEntry],
-      };
-
-      const savedPlan = await planService.save(planToSave);
-
-      if (savedPlan) {
-        useTaskStore.setState((state) => {
-          const updatedPlansByDate = {
-            ...state.plansByDate,
-            [today]: savedPlan,
-          };
-          const allTasks = Object.values(updatedPlansByDate).flatMap((plan) => plan.tasks || []);
-          return {
-            currentPlan: savedPlan,
-            plansByDate: updatedPlansByDate,
-            plannedTasks: allTasks,
-          };
-        });
-      } else {
-        await loadPlanFromDatabase(today);
-      }
-
-      toast.success('Task added!');
-      onClose?.();
+      await createScheduledTask('pending');
     } catch (error) {
       console.error('Failed to add task:', error);
       toast.error('Failed to add task');
@@ -160,10 +167,11 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
-  const pastWarning = mode === 'schedule' && scheduledTime && dueDate && (() => {
-    const dt = new Date(`${dueDate}T${scheduledTime}`);
-    return dt < new Date() && !isTimeInPast();
-  })();
+  // Live classification for the form hint (recomputed each render).
+  const liveTiming =
+    mode === 'schedule'
+      ? classifyManualTiming(dueDate, scheduledTime, parseInt(duration, 10) || 60)
+      : null;
 
   return (
     <AnimatePresence>
@@ -258,9 +266,14 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
                           value={scheduledTime}
                           onChange={setScheduledTime}
                         />
-                        {pastWarning && (
+                        {liveTiming?.state === 'past' && (
+                          <p className="text-xs text-red-600 mt-1">
+                            This whole time slot has already passed.
+                          </p>
+                        )}
+                        {liveTiming?.state === 'ongoing' && (
                           <p className="text-xs text-amber-600 mt-1">
-                            This time has passed — task will be logged retroactively.
+                            Already underway — it'll be added as in-progress.
                           </p>
                         )}
                       </div>
@@ -369,6 +382,56 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
               </form>
             </div>
           </motion.div>
+
+          {/* Ongoing-task confirmation — clearly warn before creating in-progress */}
+          {ongoingConfirm && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60"
+              onClick={() => setOngoingConfirm(false)}
+            >
+              <div
+                className="bg-white rounded-xl shadow-2xl max-w-sm w-full p-5"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center gap-2 mb-2">
+                  <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0" />
+                  <h3 className="font-semibold text-gray-900">This task is already underway</h3>
+                </div>
+                <p className="text-sm text-gray-700">
+                  Its start time (<strong>{scheduledTime}</strong>) has already passed, but it's
+                  still within its {duration}-minute window. It'll be added as{' '}
+                  <strong>in&nbsp;progress</strong> (running now) so you can finish or complete it.
+                </p>
+                <div className="mt-4 flex gap-2 justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setOngoingConfirm(false)}
+                    className="px-4 py-2 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setOngoingConfirm(false);
+                      try {
+                        await createScheduledTask('in_progress');
+                      } catch (error) {
+                        console.error('Failed to add task:', error);
+                        toast.error('Failed to add task');
+                      }
+                    }}
+                    className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                  >
+                    Add as in-progress
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
         </>
       )}
     </AnimatePresence>

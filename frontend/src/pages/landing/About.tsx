@@ -1,6 +1,5 @@
 import { motion } from 'framer-motion';
 import {
-  Brain,
   Heart,
   Sparkles,
   Target,
@@ -14,6 +13,7 @@ import {
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { LandingLayout } from '../../components/landing/LandingLayout';
+import { usePageMeta } from '../../hooks/usePageMeta';
 
 const values = [
   {
@@ -81,6 +81,10 @@ const techStack = [
 ];
 
 export function About() {
+  usePageMeta(
+    'About — Taskly',
+    'Why Taskly exists: a personal planner that respects your biology, helping you work with your natural energy instead of fighting it.',
+  );
   return (
     <LandingLayout>
       {/* Hero */}
@@ -102,11 +106,11 @@ export function About() {
               transition={{ delay: 0.1 }}
               className="text-4xl sm:text-5xl font-bold text-gray-900 mb-6 font-heading"
             >
-              Built by a{' '}
+              Built by{' '}
               <span className="bg-gradient-to-r from-blue-600 via-purple-600 to-purple-400 bg-clip-text text-transparent">
-                Nerd
+                one person
               </span>
-              , for Humans
+              , for the way you actually work
             </motion.h1>
 
             <motion.p
@@ -115,8 +119,9 @@ export function About() {
               transition={{ delay: 0.2 }}
               className="text-xl text-gray-600"
             >
-              Taskly is a passion project born from the belief that productivity
-              tools should work with your brain, not against it.
+              Taskly is an independent project — designed, built, and tested end
+              to end by a single developer who wanted a planner that respects how
+              people really think and work.
             </motion.p>
           </div>
         </div>
@@ -129,7 +134,7 @@ export function About() {
             initial={{ opacity: 0, y: 20 }}
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
-            className="relative bg-gradient-to-br from-dark-800/80 to-dark-900/80 rounded-3xl border border-dark-700/50 p-8 md:p-12 overflow-hidden"
+            className="relative bg-white/70 backdrop-blur-xl rounded-3xl border border-white/50 shadow-apple-lg p-8 md:p-12 overflow-hidden"
           >
             <div className="absolute top-0 right-0 w-64 h-64 bg-blue-500/10 rounded-full blur-3xl" />
             <div className="absolute bottom-0 left-0 w-48 h-48 bg-purple-500/10 rounded-full blur-3xl" />
@@ -137,44 +142,43 @@ export function About() {
             <div className="relative grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
               {/* Avatar/Brand */}
               <div className="text-center md:text-left">
-                <div className="inline-flex p-6 rounded-3xl bg-gradient-to-br from-blue-500/20 to-purple-500/20 border border-blue-500/30 mb-6">
-                  <Brain className="w-16 h-16 text-blue-600" />
-                </div>
-                <h2 className="text-3xl font-bold font-heading bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent mb-2">
-                  Nerdtastic🧠™
-                </h2>
-                <p className="text-xl text-gray-900 font-medium mb-4">
+                <img
+                  src="/profile.jpeg"
+                  alt="Danida Jayakody, creator of Taskly"
+                  className="w-36 h-36 rounded-3xl object-cover object-top border border-white/60 shadow-apple-lg mb-6 mx-auto md:mx-0"
+                />
+                <p className="text-2xl font-bold text-gray-900 mb-1">
                   Danida Jayakody
                 </p>
                 <p className="text-gray-600 mb-6">
-                  Developer, Designer & Productivity Enthusiast
+                  Solo developer &amp; designer of Taskly
                 </p>
                 
                 {/* Social Links */}
                 <div className="flex items-center justify-center md:justify-start gap-4">
                   <a
-                    href="#"
+                    href="https://danidajay.com"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="p-3 rounded-xl bg-dark-700/50 text-gray-600 hover:text-blue-600 hover:bg-dark-700 transition-all"
+                    className="p-3 rounded-xl bg-gray-100 text-gray-600 hover:text-blue-600 hover:bg-gray-200 transition-all"
                     title="Portfolio"
                   >
                     <Globe className="w-5 h-5" />
                   </a>
                   <a
-                    href="#"
+                    href="https://www.instagram.com/danida_j/"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="p-3 rounded-xl bg-dark-700/50 text-gray-600 hover:text-pink-400 hover:bg-dark-700 transition-all"
+                    className="p-3 rounded-xl bg-gray-100 text-gray-600 hover:text-pink-600 hover:bg-gray-200 transition-all"
                     title="Instagram"
                   >
                     <Instagram className="w-5 h-5" />
                   </a>
                   <a
-                    href="#"
+                    href="https://www.linkedin.com/in/danida-jayakody-52a884200/"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="p-3 rounded-xl bg-dark-700/50 text-gray-600 hover:text-blue-400 hover:bg-dark-700 transition-all"
+                    className="p-3 rounded-xl bg-gray-100 text-gray-600 hover:text-blue-600 hover:bg-gray-200 transition-all"
                     title="LinkedIn"
                   >
                     <Linkedin className="w-5 h-5" />
@@ -185,20 +189,22 @@ export function About() {
               {/* Bio */}
               <div>
                 <p className="text-gray-600 leading-relaxed mb-4">
-                  Hey! I'm a passionate developer who believes technology should 
-                  make life easier, not more complicated.
+                  Taskly started as a tool I built for myself. Like a lot of
+                  people, I'd tried planner after planner and kept hitting the same
+                  wall — they treated every task and every hour as the same,
+                  ignoring that a tired afternoon is nothing like a focused morning.
                 </p>
                 <p className="text-gray-600 leading-relaxed mb-4">
-                  Taskly started as a personal project to solve my own 
-                  productivity struggles. Like many, I tried countless apps but 
-                  found they all shared the same flaw: they treated all tasks 
-                  and all hours equally.
+                  So I built the planner I wished existed. Every part of Taskly —
+                  the design, the code, the AI, the testing, the late-night bug
+                  fixes — is the work of one person. There's no team and no
+                  investors behind it; just someone who genuinely cares whether it
+                  works for you.
                 </p>
                 <p className="text-gray-600 leading-relaxed">
-                  So I built something different — an AI-powered planner that 
-                  understands that creative work needs peak energy, and that 
-                  sometimes, a 15-minute break is the most productive thing 
-                  you can do.
+                  It's early, and it's growing one honest step at a time. If Taskly
+                  makes even one of your days feel a little more human, it's done
+                  its job.
                 </p>
               </div>
             </div>

@@ -52,8 +52,26 @@ async function ensureSw(): Promise<ServiceWorkerRegistration | null> {
   try {
     // Pass API base via query so the SW knows where to fetch its own config.
     const swUrl = `/firebase-messaging-sw.js?api=${encodeURIComponent(API_URL)}`;
-    _swRegistration = await navigator.serviceWorker.register(swUrl, { scope: '/' });
-    await navigator.serviceWorker.ready;
+    // Register the FCM worker at its OWN scope ('/fcm/'), not '/'. The
+    // vite-plugin-pwa (workbox) SW owns '/', and a scope holds exactly one
+    // registration — registering FCM at '/' evicts one or the other on each
+    // load, making background push a coin-flip. FCM does not need to control any
+    // page: its background messages are delivered via the push subscription on
+    // the registration we hand to getToken() below, regardless of scope. A
+    // script at '/' may register at any sub-scope with no special header.
+    _swRegistration = await navigator.serviceWorker.register(swUrl, { scope: '/fcm/' });
+    // Wait for THIS registration to become active (not navigator.serviceWorker.ready,
+    // which resolves for the page-controlling worker — that's workbox at '/').
+    if (_swRegistration.installing || _swRegistration.waiting) {
+      await new Promise<void>((resolve) => {
+        const worker = _swRegistration!.installing || _swRegistration!.waiting;
+        if (!worker) return resolve();
+        if (worker.state === 'activated') return resolve();
+        worker.addEventListener('statechange', () => {
+          if (worker.state === 'activated') resolve();
+        });
+      });
+    }
     return _swRegistration;
   } catch (e) {
     console.warn('[FCM] Service worker registration failed', e);
