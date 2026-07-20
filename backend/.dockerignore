@@ -1,0 +1,23 @@
+# Secrets — must NEVER be baked into the image (images are pushed to GHCR).
+# These are provided at runtime instead: .env via env_file, and the Firebase
+# credentials via a bind-mount (see deploy/docker-compose.yml).
+.env
+.env.*
+firebase-credentials.json
+
+# Python caches / virtualenvs
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+ENV/
+
+# Local tooling / tests / VCS
+.git/
+.gitignore
+.pytest_cache/
+.mypy_cache/
+test_*.py
+*.md

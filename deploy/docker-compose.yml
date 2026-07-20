@@ -1,0 +1,42 @@
+# Taskly — production compose (image-based, no build context).
+# Lives on the VPS at /root/taskly/docker-compose.yml.
+# Images are built & pushed by .github/workflows/deploy.yml and pulled here.
+version: '3.8'
+
+services:
+  # Frontend — React/Vite served by nginx on :80 (SPA + internal /api proxy).
+  client:
+    image: ghcr.io/danidaj/taskly-client:latest
+    container_name: taskly-client
+    restart: unless-stopped
+    networks:
+      - portfolio-net
+      - taskly-network
+    depends_on:
+      - server
+
+  # Backend — FastAPI on :8000.
+  server:
+    image: ghcr.io/danidaj/taskly-server:latest
+    container_name: taskly-server
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DEBUG=false
+      # Backend reads CORS_ORIGINS as a JSON array (app/core/config.py).
+      - CORS_ORIGINS=["https://taskly.danidajay.com"]
+    volumes:
+      # Firebase Admin credentials — kept OUT of the image (.dockerignore) and
+      # provided at runtime. Must exist at /root/taskly/firebase-credentials.json.
+      - ./firebase-credentials.json:/app/firebase-credentials.json:ro
+    networks:
+      - portfolio-net
+      - taskly-network
+
+networks:
+  taskly-network:
+    driver: bridge
+  # Shared with the VPS nginx reverse proxy (already created for softspace).
+  portfolio-net:
+    external: true

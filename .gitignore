@@ -26,6 +26,8 @@ wheels/
 .env.local
 .env.*.local
 .env.*
+# ...but keep the committed deployment template (real .env files stay ignored).
+!deploy/.env.example
 .venv/
 venv/
 ENV/

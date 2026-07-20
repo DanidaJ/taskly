@@ -1,0 +1,13 @@
+# Installed/built inside the image — never copy the local copies in.
+node_modules/
+dist/
+
+# Secrets / local env (Vite vars are passed as build-args instead).
+.env
+.env.*
+
+# Local artifacts / VCS
+build_log.txt
+.git/
+.gitignore
+*.md

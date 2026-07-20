@@ -1,0 +1,62 @@
+name: CI/CD Deploy Taskly
+
+on:
+  push:
+    branches:
+      - production
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout the repo
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Login to GitHub Container Registry (GHCR)
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Step 3: Build & push backend
+      - name: Build & Push Backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: ghcr.io/danidaj/taskly-server:latest
+          build-args: |
+            ENVIRONMENT=production
+
+      # Step 4: Build & push frontend
+      # VITE_API_URL is the site origin (the app appends /api/v1 itself), so it
+      # must NOT include a /api suffix.
+      - name: Build & Push Frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: ghcr.io/danidaj/taskly-client:latest
+          build-args: |
+            VITE_API_URL=https://taskly.danidajay.com
+            VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}
+            VITE_SUPABASE_PUBLISHABLE_KEY=${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+
+      # Step 5: Deploy on VPS via SSH
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /root/taskly
+            # Login to GHCR on the VPS (required if the images are private)
+            echo ${{ secrets.GHCR_PAT }} | docker login ghcr.io -u danidaj --password-stdin
+            docker compose pull
+            docker compose up -d
+            docker image prune -f
