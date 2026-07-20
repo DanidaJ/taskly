@@ -98,12 +98,16 @@ cd /root/taskly
 # Production compose
 scp deploy/docker-compose.yml root@168.231.73.185:/root/taskly/docker-compose.yml
 
-# Nginx config → shared reverse proxy
-scp deploy/taskly.conf root@168.231.73.185:/root/nginx/conf.d/taskly.conf
-
 # Firebase Admin credentials (gitignored secret, from backend/)
 scp backend/firebase-credentials.json root@168.231.73.185:/root/taskly/firebase-credentials.json
 ```
+
+> ⚠️ **Do NOT upload `taskly.conf` yet.** The reverse proxy resolves upstream
+> hostnames when it loads its config. If `taskly.conf` references the
+> `taskly-client` / `taskly-server` containers before they exist — or before the
+> SSL cert exists — `nginx -t` fails and the **entire** proxy refuses to start,
+> taking down every other site on the box. `taskly.conf` goes on LAST (Step 2.7),
+> after the containers are up and the cert is issued.
 
 ### 2.3 Create the backend `.env` on the VPS
 ```bash
@@ -118,20 +122,42 @@ vars only (Supabase keys, Mistral, Firebase web config, notifications).
 echo <YOUR_GHCR_PAT> | docker login ghcr.io -u danidaj --password-stdin
 ```
 
-### 2.5 Get the SSL certificate
+### 2.5 Start the taskly containers (BEFORE touching nginx)
+The reverse proxy needs these containers to exist before it will accept
+`taskly.conf`, so bring them up first.
 ```bash
-# Free port 80 so certbot standalone can bind it
+cd /root/taskly
+docker login ghcr.io -u danidaj      # if the GHCR packages are private
+docker compose up -d
+docker ps | grep taskly              # taskly-client + taskly-server, both Up
+docker logs --tail 15 taskly-client  # ends at "ready for start up", NO [emerg]
+```
+
+### 2.6 Get the SSL certificate
+```bash
+ls -l /etc/letsencrypt/live/taskly.danidajay.com/ 2>&1   # skip if it already exists
+
+# Free port 80 so certbot standalone can bind it (~20s blip on other sites)
 cd /root/nginx && docker compose stop
-
 certbot certonly --standalone -d taskly.danidajay.com
-
 cd /root/nginx && docker compose up -d
 ```
 
-### 2.6 Reload nginx to pick up taskly.conf
+### 2.7 Add taskly.conf LAST, then validate before reloading
 ```bash
-docker exec nginx nginx -t && docker exec nginx nginx -s reload
+# From LOCAL:
+scp deploy/taskly.conf root@168.231.73.185:/root/nginx/conf.d/taskly.conf
+
+# On the VPS — the proxy container is named `nginx-reverse-proxy`:
+docker exec nginx-reverse-proxy nginx -t     # MUST say "test is successful"
+docker exec nginx-reverse-proxy nginx -s reload
 ```
+
+> If `nginx -t` fails, **do not reload** and **do not restart** the proxy — the
+> already-running instance keeps serving your other sites off the old config.
+> Fix (or `rm`) `taskly.conf` first. `taskly.conf` uses a Docker `resolver` so a
+> stopped taskly container only 502s taskly instead of taking the proxy down,
+> but a missing SSL cert will still fail startup — hence cert before conf.
 
 ---
 

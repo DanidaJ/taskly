@@ -31,8 +31,14 @@ services:
       # provided at runtime. Must exist at /root/taskly/firebase-credentials.json.
       - ./firebase-credentials.json:/app/firebase-credentials.json:ro
     networks:
-      - portfolio-net
-      - taskly-network
+      portfolio-net:
+      taskly-network:
+        # The client image's internal nginx (frontend/nginx.conf) proxies /api
+        # to the hostname `backend`, baked in at build time. nginx validates
+        # every upstream at startup, so without this alias the client crash-loops
+        # with "host not found in upstream 'backend'".
+        aliases:
+          - backend
 
 networks:
   taskly-network:
