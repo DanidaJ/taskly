@@ -604,15 +604,18 @@ export default function Analytics() {
         {/* Focus Time Chart */}
         <div className="glass-card">
           <h3 className="text-lg font-semibold text-gray-900 mb-4">Focus Time</h3>
-          <div className="flex items-end gap-2 h-40">
+          <div className="flex items-end gap-2">
             {weeklyData.map((day, i) => (
               <div key={day.date} className="flex-1 flex flex-col items-center">
-                <motion.div
-                  initial={{ height: 0 }}
-                  animate={{ height: `${(day.focusMinutes / maxFocus) * 100}%` }}
-                  transition={{ delay: i * 0.05, duration: 0.3 }}
-                  className="w-full bg-gradient-to-t from-blue-500 to-cyan-500 rounded-t min-h-[4px]"
-                />
+                {/* Fixed-height bar area so the percentage height actually resolves. */}
+                <div className="w-full h-40 flex items-end">
+                  <motion.div
+                    initial={{ height: 0 }}
+                    animate={{ height: `${(day.focusMinutes / maxFocus) * 100}%` }}
+                    transition={{ delay: i * 0.05, duration: 0.3 }}
+                    className="w-full bg-gradient-to-t from-blue-500 to-cyan-500 rounded-t min-h-[4px]"
+                  />
+                </div>
                 <div className="text-xs text-gray-600 mt-2">
                   {format(parseISO(day.date), 'EEE')}
                 </div>
@@ -627,10 +630,11 @@ export default function Analytics() {
         {/* Task Completion Chart (with missed overlay) */}
         <div className="glass-card">
           <h3 className="text-lg font-semibold text-gray-900 mb-4">Task Completion</h3>
-          <div className="flex items-end gap-2 h-40">
+          <div className="flex items-end gap-2">
             {weeklyData.map((day, i) => (
               <div key={day.date} className="flex-1 flex flex-col items-center">
-                <div className="w-full relative h-full flex items-end">
+                {/* Fixed-height bar area so the percentage heights actually resolve. */}
+                <div className="w-full relative h-40 flex items-end">
                   {/* Planned (background) */}
                   <motion.div
                     initial={{ height: 0 }}
