@@ -106,7 +106,7 @@ export default function Layout() {
           {/* Logo */}
           <div className="flex items-center justify-between h-13 px-4 border-b border-gray-200/50">
             <div className="flex items-center gap-2">
-              <Sparkles className="w-5 h-5 text-blue-600" />
+              <img src="/logo.svg" alt="Taskly" className="w-6 h-6" />
               <span className="text-base font-bold gradient-text-blue">Taskly</span>
             </div>
             <button
@@ -185,7 +185,7 @@ export default function Layout() {
               <Menu className="w-5 h-5 text-gray-700" />
             </button>
             <div className="flex items-center gap-2 ml-4">
-              <Sparkles className="w-5 h-5 text-blue-600" />
+              <img src="/logo.svg" alt="Taskly" className="w-6 h-6" />
               <span className="text-lg font-bold gradient-text-blue">Taskly</span>
             </div>
           </div>
