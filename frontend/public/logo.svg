@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Taskly">
+  <!-- Flat-vector interpretation of the Taskly mark: a checklist page with a
+       folded corner and a clock badge. Hand-authored (not auto-traced) so it
+       stays crisp from 16px favicon up to 512px, and tiny in bytes. -->
+
+  <!-- Folded corner (dog-ear), drawn first so the page sits over it -->
+  <path d="M286,104 H336 Q348,104 348,116 V166 Z" fill="#8B5CF6"/>
+
+  <!-- Page body with cut (folded) top-right corner -->
+  <path d="M140,104 H286 L348,166 V336 Q348,372 312,372 H140 Q104,372 104,336 V140 Q104,104 140,104 Z"
+        fill="#FFFFFF" stroke="#4338CA" stroke-width="18" stroke-linejoin="round"/>
+
+  <!-- Checklist rows: coloured dot + line -->
+  <circle cx="156" cy="166" r="22" fill="#8B5CF6"/>
+  <path d="M146,166 L153,174 L167,158" fill="none" stroke="#FFFFFF" stroke-width="6"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="194" y="157" width="104" height="18" rx="9" fill="#4F46E5"/>
+
+  <circle cx="156" cy="228" r="22" fill="#3B82F6"/>
+  <rect x="194" y="219" width="104" height="18" rx="9" fill="#4F46E5"/>
+
+  <circle cx="156" cy="290" r="22" fill="#22D3EE"/>
+  <rect x="194" y="281" width="76" height="18" rx="9" fill="#4F46E5"/>
+
+  <!-- Clock badge, overlapping the page's bottom-right -->
+  <circle cx="356" cy="356" r="74" fill="#FFFFFF" stroke="#4338CA" stroke-width="20"/>
+  <path d="M356,356 V308 M356,356 L392,380" fill="none" stroke="#7C3AED" stroke-width="12"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="356" cy="356" r="6" fill="#7C3AED"/>
+</svg>

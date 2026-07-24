@@ -3,8 +3,11 @@
 
 <head>
   <meta charset="UTF-8" />
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" type="image/svg+xml" href="/logo.svg" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+  <link rel="shortcut icon" href="/favicon.ico" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Taskly — Plan Smarter, Not Harder</title>
   <meta name="description" content="Taskly is an AI personal planner that builds your day around your natural energy. Type a brain-dump and watch a schedule assemble itself around your peak-focus hours and wind-down time." />
   <meta name="theme-color" content="#007AFF" />
@@ -27,8 +30,13 @@
   <meta name="twitter:description" content="An AI personal planner that schedules your day around your natural energy." />
   <meta name="twitter:image" content="/og-image.png" />
 
-  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <!-- PWA / installable app -->
   <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Taskly" />
   <style>
     @import url('https://fonts.cdnfonts.com/css/sf-pro-display');
     /* Paint the light app background before React/CSS mounts, so there is no flash. */
