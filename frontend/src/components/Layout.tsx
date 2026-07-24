@@ -1,4 +1,4 @@
-import { Outlet, NavLink, useLocation } from 'react-router-dom';
+import { Outlet, NavLink, Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard,
@@ -138,18 +138,13 @@ export default function Layout() {
             })}
           </nav>
 
-          {/* Help / How it works — opens the guide in a new tab so the app
-              session and any running timer aren't disrupted. */}
+          {/* In-app usage guide (concrete walkthroughs). The public /how-it-works
+              page is marketing — this is the real how-to for signed-in users. */}
           <div className="px-2 pb-1">
-            <a
-              href="/how-it-works"
-              target="_blank"
-              rel="noreferrer"
-              className="nav-item"
-            >
+            <Link to="/app/guide" className="nav-item">
               <HelpCircle className="w-5 h-5" />
               Help &amp; Guide
-            </a>
+            </Link>
           </div>
 
           {/* User section */}

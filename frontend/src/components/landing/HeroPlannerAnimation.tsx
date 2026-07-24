@@ -325,7 +325,13 @@ export function HeroPlannerAnimation({ startDelay = 0 }: { startDelay?: number }
 
   return (
     <MotionConfig reducedMotion="user">
-      <div ref={ref} aria-hidden="true" className="w-full">
+      <div
+        ref={ref}
+        aria-hidden="true"
+        className="w-full"
+        data-hero-phase={phase}
+        data-hero-cycle={loop.cycle}
+      >
         <motion.div
           key={loop.cycle}
           initial={instant ? false : { opacity: 0 }}
