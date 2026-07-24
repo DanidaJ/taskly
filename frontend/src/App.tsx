@@ -10,11 +10,14 @@ import Reflection from '@/pages/Reflection';
 import Settings from '@/pages/Settings';
 import Auth from '@/pages/Auth';
 import ResetPassword from '@/pages/ResetPassword';
+import HelpGuide from '@/pages/HelpGuide';
 import FocusTimer from '@/pages/FocusTimer';
 import SleepTracker from '@/pages/SleepTracker';
 import Analytics from '@/pages/Analytics';
 import Backlog from '@/pages/Backlog';
 import { Home, Features, HowItWorks, About, PrivacyPolicy, Terms } from '@/pages/landing';
+// Dev-only capture stage for scripts/capture-hero.mjs — never routed in production (see below).
+import CaptureHero from '@/pages/landing/CaptureHero';
 import { useEffect } from 'react';
 import toast from 'react-hot-toast';
 import {
@@ -109,6 +112,10 @@ function App() {
         <Route path="/about" element={<About />} />
         <Route path="/privacy" element={<PrivacyPolicy />} />
         <Route path="/terms" element={<Terms />} />
+        {/* Dev-only: source for the marketing capture script, absent from production routing. */}
+        {import.meta.env.DEV && (
+          <Route path="/capture-hero" element={<CaptureHero />} />
+        )}
 
         {/* App Routes */}
         <Route path="/app/auth" element={<Auth />} />
@@ -131,6 +138,7 @@ function App() {
           <Route path="analytics" element={<Analytics />} />
           <Route path="reflection" element={<Reflection />} />
           <Route path="settings" element={<Settings />} />
+          <Route path="guide" element={<HelpGuide />} />
         </Route>
 
         {/* Fallback */}

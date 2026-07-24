@@ -53,6 +53,9 @@ backend/dist/
 .svelte-kit/
 .vite/
 
+# Marketing capture export (scripts/capture-hero.mjs output) — regenerable, not source
+frontend/marketing-export/
+
 # Logs
 logs/
 *.log
