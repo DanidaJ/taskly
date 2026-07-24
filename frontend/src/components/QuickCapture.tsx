@@ -185,11 +185,21 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
             onClick={onClose}
           />
 
+          {/* Flex wrapper centers the modal. We can't use -translate-x-1/2 on the
+              motion node itself: Framer Motion writes an inline transform for the
+              y/scale animation, which overrides the Tailwind translate class and
+              pushes the modal off-screen on narrow (mobile) viewports. The wrapper
+              also scrolls so tall content stays reachable on short screens. */}
+          <div
+            className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto px-4 pt-[12vh] pb-8"
+            onClick={onClose}
+          >
           <motion.div
             initial={{ opacity: 0, y: -20, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -20, scale: 0.95 }}
-            className="fixed top-[12%] left-1/2 -translate-x-1/2 w-full max-w-xl z-50 px-4"
+            className="w-full max-w-xl"
+            onClick={(e) => e.stopPropagation()}
           >
             <div className="bg-dark-800/80 backdrop-blur-xl border border-dark-600/60 rounded-xl shadow-2xl overflow-visible">
               {/* Header */}
@@ -382,6 +392,7 @@ export default function QuickCapture({ onClose, isOpen }: QuickCaptureProps) {
               </form>
             </div>
           </motion.div>
+          </div>
 
           {/* Ongoing-task confirmation — clearly warn before creating in-progress */}
           {ongoingConfirm && (
