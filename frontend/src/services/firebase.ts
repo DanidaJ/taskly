@@ -118,10 +118,38 @@ export async function requestNotificationPermission(): Promise<NotificationPermi
   return await Notification.requestPermission();
 }
 
+// A browser notification permission can't be revoked programmatically — once
+// 'granted' it stays granted until the user changes it in browser settings. So
+// "disable on this device" can't rely on permission state; this local flag is
+// the source of truth for the user's intent and gates (re)registration below.
+const MUTED_KEY = 'taskly:notif-muted';
+
+/** True if the user has explicitly turned notifications OFF on this device. */
+export function isDeviceMuted(): boolean {
+  try {
+    return localStorage.getItem(MUTED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+/** Records the user's on/off intent for this device. */
+export function setDeviceMuted(muted: boolean): void {
+  try {
+    if (muted) localStorage.setItem(MUTED_KEY, '1');
+    else localStorage.removeItem(MUTED_KEY);
+  } catch {
+    /* storage unavailable (private mode etc.) — best effort */
+  }
+}
+
 /** Registers the FCM token for the current user. Idempotent — safe to call
- *  on every login / app start. Returns the token, or null on failure. */
+ *  on every login / app start. Returns the token, or null on failure.
+ *  No-ops if the user muted notifications on this device, so auto-registration
+ *  on app load can't silently undo a "disable on this device". */
 export async function ensureFcmTokenRegistered(authToken?: string | null): Promise<string | null> {
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return null;
+  if (isDeviceMuted()) return null;
   const messaging = await ensureMessaging();
   if (!messaging) return null;
   const cfg = await fetchConfig();
