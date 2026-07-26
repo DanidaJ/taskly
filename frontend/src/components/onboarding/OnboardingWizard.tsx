@@ -6,6 +6,7 @@ import {
   Moon,
   Sun,
   Gauge,
+  Bell,
   ArrowRight,
   ArrowLeft,
   Check,
@@ -14,6 +15,8 @@ import { Button, Input } from '@/components/ui';
 import { EnergyPreference } from '@/types';
 import { profileService, onboardingService } from '@/services/api';
 import { useUserProfileStore, defaultPreferences, defaultEnergyProfile } from '@/stores/userProfileStore';
+import { useNotificationStatus } from '@/hooks/useNotificationStatus';
+import InstallPWA from '@/components/InstallPWA';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
 
@@ -38,11 +41,12 @@ const ENERGY_OPTIONS: { value: EnergyPreference; label: string; description: str
   { value: 'night', label: 'Night owl', description: 'Sharpest after 10pm' },
 ];
 
-// welcome -> energy -> peak -> sleep -> workload
-const TOTAL_STEPS = 5;
+// welcome -> energy -> peak -> sleep -> workload -> reminders
+const TOTAL_STEPS = 6;
 
 export default function OnboardingWizard({ onDone }: OnboardingWizardProps) {
   const { setEnergyProfile, setSleepSchedule, setPreferences } = useUserProfileStore();
+  const notif = useNotificationStatus();
 
   const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
@@ -54,6 +58,8 @@ export default function OnboardingWizard({ onDone }: OnboardingWizardProps) {
   const [wakeTime, setWakeTime] = useState('07:00');
   const [sleepTime, setSleepTime] = useState('23:00');
   const [maxHours, setMaxHours] = useState(8);
+  // Reminders opt-in defaults ON — most users want it and forget to enable it later.
+  const [notifOptIn, setNotifOptIn] = useState(true);
 
   const choosePreference = (value: EnergyPreference) => {
     setPreference(value);
@@ -111,6 +117,20 @@ export default function OnboardingWizard({ onDone }: OnboardingWizardProps) {
     onDone();
   };
 
+  // Final step's action: the permission prompt must fire from this click (a user
+  // gesture is required — it can't be triggered automatically or later), so we
+  // request it here BEFORE the profile save so the gesture isn't consumed.
+  const handleFinish = async () => {
+    if (notifOptIn && notif.state === 'default') {
+      try {
+        await notif.enable();
+      } catch {
+        /* non-fatal — the dashboard banner keeps nudging until it's on */
+      }
+    }
+    await persist();
+  };
+
   const skip = async () => {
     setSaving(true);
     try {
@@ -128,6 +148,7 @@ export default function OnboardingWizard({ onDone }: OnboardingWizardProps) {
     { icon: Zap, accent: 'text-amber-500' },
     { icon: Moon, accent: 'text-indigo-500' },
     { icon: Gauge, accent: 'text-green-600' },
+    { icon: Bell, accent: 'text-blue-600' },
   ][step];
   const StepIcon = stepMeta.icon;
 
@@ -298,6 +319,97 @@ export default function OnboardingWizard({ onDone }: OnboardingWizardProps) {
                   </div>
                 </div>
               )}
+
+              {/* Step 5 — Reminders (opt-in defaults ON) */}
+              {step === 5 && (
+                <div>
+                  <h2 className="text-xl font-bold text-gray-900 mb-1">
+                    Stay on track with reminders
+                  </h2>
+                  <p className="text-gray-600 mb-5 text-sm">
+                    Taskly can nudge you when a task is about to start, when to take a
+                    break, and when to wind down — the difference between a plan you
+                    follow and one you forget.
+                  </p>
+
+                  {notif.state === 'granted' && (
+                    <div className="flex items-center gap-3 p-4 rounded-2xl bg-green-50 border border-green-200">
+                      <Bell className="w-5 h-5 text-green-600 flex-shrink-0" />
+                      <p className="text-sm font-medium text-green-800">
+                        Reminders are already on for this device.
+                      </p>
+                    </div>
+                  )}
+
+                  {notif.state === 'needs-install' && (
+                    <div className="p-4 rounded-2xl bg-blue-50 border border-blue-200 space-y-3">
+                      <p className="text-sm text-blue-900">
+                        On iPhone or iPad, reminders work once Taskly is added to your
+                        Home Screen.
+                      </p>
+                      <InstallPWA label="Add to Home Screen" />
+                    </div>
+                  )}
+
+                  {(notif.state === 'default' ||
+                    notif.state === 'denied' ||
+                    notif.state === 'unsupported') && (
+                    <button
+                      type="button"
+                      onClick={() => setNotifOptIn((v) => !v)}
+                      className={clsx(
+                        'w-full flex items-center justify-between gap-3 p-4 rounded-2xl border text-left transition-all',
+                        notifOptIn
+                          ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-500'
+                          : 'border-gray-200 hover:border-gray-300'
+                      )}
+                    >
+                      <span className="flex items-center gap-3">
+                        <Bell
+                          className={clsx(
+                            'w-5 h-5 flex-shrink-0',
+                            notifOptIn ? 'text-blue-600' : 'text-gray-400'
+                          )}
+                        />
+                        <span>
+                          <span className="block font-medium text-gray-900">
+                            Send me reminders
+                          </span>
+                          <span className="block text-sm text-gray-500">
+                            Recommended — fine-tune what &amp; when in Settings
+                          </span>
+                        </span>
+                      </span>
+                      <span
+                        className={clsx(
+                          'relative w-11 h-6 rounded-full transition-colors flex-shrink-0',
+                          notifOptIn ? 'bg-blue-600' : 'bg-gray-300'
+                        )}
+                      >
+                        <span
+                          className={clsx(
+                            'absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform',
+                            notifOptIn && 'translate-x-5'
+                          )}
+                        />
+                      </span>
+                    </button>
+                  )}
+
+                  {notif.state === 'default' && notifOptIn && (
+                    <p className="text-xs text-gray-400 mt-4">
+                      When you tap Finish, your browser will ask for permission — choose{' '}
+                      <strong>Allow</strong> to turn reminders on.
+                    </p>
+                  )}
+                  {notif.state === 'denied' && (
+                    <p className="text-xs text-amber-600 mt-4">
+                      Notifications are currently blocked in your browser. You can allow
+                      them later from your browser&apos;s site settings.
+                    </p>
+                  )}
+                </div>
+              )}
             </motion.div>
           </AnimatePresence>
 
@@ -324,7 +436,7 @@ export default function OnboardingWizard({ onDone }: OnboardingWizardProps) {
                 {step === 0 ? 'Get started' : 'Continue'}
               </Button>
             ) : (
-              <Button variant="primary" onClick={persist} isLoading={saving} leftIcon={<Check className="w-4 h-4" />}>
+              <Button variant="primary" onClick={handleFinish} isLoading={saving || notif.busy} leftIcon={<Check className="w-4 h-4" />}>
                 Finish setup
               </Button>
             )}

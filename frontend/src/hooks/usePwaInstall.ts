@@ -7,7 +7,7 @@ interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
 }
 
-function detectIOS(): boolean {
+export function detectIOS(): boolean {
   if (typeof navigator === 'undefined') return false;
   const ua = navigator.userAgent || '';
   const isIOSDevice = /iphone|ipad|ipod/i.test(ua);
@@ -16,7 +16,7 @@ function detectIOS(): boolean {
   return isIOSDevice || isIPadOS;
 }
 
-function detectStandalone(): boolean {
+export function detectStandalone(): boolean {
   if (typeof window === 'undefined') return false;
   const displayMode = window.matchMedia?.('(display-mode: standalone)').matches;
   // iOS Safari exposes standalone on navigator instead of matchMedia.

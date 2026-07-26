@@ -27,6 +27,7 @@ import { clsx } from 'clsx';
 import { buildFocusTaskUrl } from '@/utils';
 import { getTaskBadgeClasses, getTaskLifecycleTimeline, getTaskStartBadge, getTaskStatusBadge, getTaskTimerBadge } from '@/utils/taskLifecycle';
 import TaskStartConfirmModal, { getStartContext, StartContext } from '@/components/TaskStartConfirmModal';
+import NotificationBanner from '@/components/NotificationBanner';
 import { PlannedTask } from '@/types';
 import toast from 'react-hot-toast';
 
@@ -235,6 +236,9 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-8">
+      {/* Persistent nudge whenever this device isn't set up for reminders */}
+      <NotificationBanner />
+
       {/* Morning Briefing Header */}
       <div className="glass-card bg-gradient-to-r from-blue-500/10 via-purple-500/10 to-blue-500/10 border-gray-200">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
