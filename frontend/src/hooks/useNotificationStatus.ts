@@ -4,6 +4,8 @@ import {
   requestNotificationPermission,
   ensureFcmTokenRegistered,
   isPushSupported,
+  isDeviceMuted,
+  setDeviceMuted,
 } from '@/services/firebase';
 import { useAuthStore } from '@/stores/authStore';
 import { detectIOS, detectStandalone } from './usePwaInstall';
@@ -27,6 +29,9 @@ function readPermission(): NotificationPermission | null {
 export function useNotificationStatus() {
   const [permission, setPermission] = useState<NotificationPermission | null>(readPermission);
   const [supported, setSupported] = useState<boolean | null>(null);
+  // Local "turned off on this device" intent — permission can't be revoked, so a
+  // granted-but-muted device is still "off" and should be nudged like an unset one.
+  const [muted, setMuted] = useState<boolean>(isDeviceMuted);
   const [busy, setBusy] = useState(false);
   const isIOS = detectIOS();
   const isStandalone = detectStandalone();
@@ -34,6 +39,7 @@ export function useNotificationStatus() {
   const refresh = useCallback(async () => {
     setPermission(await getNotificationPermission());
     setSupported(await isPushSupported());
+    setMuted(isDeviceMuted());
   }, []);
 
   useEffect(() => {
@@ -62,6 +68,9 @@ export function useNotificationStatus() {
       const perm = await requestNotificationPermission();
       setPermission(perm);
       if (perm === 'granted') {
+        // Enabling from any surface clears a prior "off on this device" intent.
+        setDeviceMuted(false);
+        setMuted(false);
         const session = useAuthStore.getState().session;
         await ensureFcmTokenRegistered(session?.access_token);
       }
@@ -72,11 +81,12 @@ export function useNotificationStatus() {
   }, []);
 
   let state: NotifState;
-  if (permission === 'granted') state = 'granted';
+  if (permission === 'granted' && !muted) state = 'granted';
   else if (isIOS && !isStandalone) state = 'needs-install';
   else if (supported === false) state = 'unsupported';
   else if (permission === 'denied') state = 'denied';
+  // 'default' also covers granted-but-muted: a click re-enables without a prompt.
   else state = 'default';
 
-  return { state, permission, supported, isIOS, isStandalone, busy, enable, refresh };
+  return { state, permission, supported, muted, isIOS, isStandalone, busy, enable, refresh };
 }

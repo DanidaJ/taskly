@@ -27,7 +27,7 @@ import { useUserProfileStore, useAuthStore } from '@/stores';
 import { Commitment, CommitmentType, ROUTINE_TYPES, EnergyPreference, CognitiveLoad, RecurringTask, RecurrenceType, RoutineTemplate, PresetTemplate } from '@/types';
 import { Button, Input, Modal } from '@/components/ui';
 import { commitmentService, profileService, recurringTaskService, routineTemplateService, notificationService as pushNotificationService, NotificationPreferences, accountService } from '@/services/api';
-import { requestNotificationPermission, ensureFcmTokenRegistered, unregisterFcmToken, getNotificationPermission, isPushSupported } from '@/services/firebase';
+import { requestNotificationPermission, ensureFcmTokenRegistered, unregisterFcmToken, getNotificationPermission, isPushSupported, isDeviceMuted, setDeviceMuted } from '@/services/firebase';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
 
@@ -159,6 +159,8 @@ export default function Settings() {
   const [notifPrefs, setNotifPrefs] = useState<NotificationPreferences>(defaultNotifPrefs);
   const [notifPermission, setNotifPermission] = useState<NotificationPermission | null>(null);
   const [pushSupported, setPushSupported] = useState<boolean>(true);
+  // Local "off on this device" intent — the real toggle, since permission can't be revoked.
+  const [deviceMuted, setDeviceMutedState] = useState<boolean>(() => isDeviceMuted());
   const [savingNotif, setSavingNotif] = useState(false);
   const [testingNotif, setTestingNotif] = useState(false);
 
@@ -200,6 +202,7 @@ export default function Settings() {
     (async () => {
       setPushSupported(await isPushSupported());
       setNotifPermission(await getNotificationPermission());
+      setDeviceMutedState(isDeviceMuted());
       try {
         const prefs = await pushNotificationService.getPreferences();
         const normalized: NotificationPreferences = {
@@ -246,6 +249,9 @@ export default function Settings() {
     const perm = await requestNotificationPermission();
     setNotifPermission(perm);
     if (perm === 'granted') {
+      // Clear the local mute BEFORE registering — ensureFcmTokenRegistered bails while muted.
+      setDeviceMuted(false);
+      setDeviceMutedState(false);
       const session = useAuthStore.getState().session;
       const token = await ensureFcmTokenRegistered(session?.access_token);
       if (token) {
@@ -260,6 +266,9 @@ export default function Settings() {
   };
 
   const handleDisableOnDevice = async () => {
+    // Record the intent locally first so it survives reloads (auto-register respects it).
+    setDeviceMuted(true);
+    setDeviceMutedState(true);
     const session = useAuthStore.getState().session;
     await unregisterFcmToken(session?.access_token);
     toast.success('Notifications disabled on this device');
@@ -987,12 +996,13 @@ export default function Settings() {
                     <p className="font-medium text-gray-900">This device</p>
                     <p className="text-sm text-gray-600 mt-1">
                       {!pushSupported && 'Push notifications are not supported in this browser.'}
-                      {pushSupported && notifPermission === 'granted' && 'Notifications are enabled on this device.'}
+                      {pushSupported && notifPermission === 'granted' && !deviceMuted && 'Notifications are enabled on this device.'}
+                      {pushSupported && notifPermission === 'granted' && deviceMuted && 'Notifications are turned off on this device.'}
                       {pushSupported && notifPermission === 'denied' && 'Permission was denied. Enable it from your browser settings.'}
                       {pushSupported && (notifPermission === 'default' || notifPermission === null) && 'Click below to enable notifications on this device.'}
                     </p>
                   </div>
-                  {pushSupported && notifPermission === 'granted' ? (
+                  {pushSupported && notifPermission === 'granted' && !deviceMuted ? (
                     <Button variant="ghost" onClick={handleDisableOnDevice}>Disable on this device</Button>
                   ) : (
                     <Button onClick={handleEnableNotifications} disabled={!pushSupported}>Enable</Button>
