@@ -206,10 +206,16 @@ export default function Layout() {
           </AnimatePresence>
         </main>
 
-        {/* Floating Add Task Button - Apple Style */}
+        {/* Floating Add Task Button - Apple Style. Hidden on mobile for the AI
+            Planner: the fixed FAB sits directly over the chat's send button
+            there, blocking it. Desktop keeps it — the chat panel doesn't reach
+            that corner at wider widths, so there's no overlap. */}
         <button
           onClick={() => setQuickCaptureOpen(true)}
-          className="fixed bottom-8 right-8 w-14 h-14 rounded-full bg-gradient-to-br from-blue-500 to-blue-600 text-white shadow-apple-lg hover:shadow-glow-blue hover:scale-105 active:scale-95 transition-all flex items-center justify-center z-40"
+          className={clsx(
+            'fixed bottom-8 right-8 w-14 h-14 rounded-full bg-gradient-to-br from-blue-500 to-blue-600 text-white shadow-apple-lg hover:shadow-glow-blue hover:scale-105 active:scale-95 transition-all items-center justify-center z-40',
+            location.pathname === '/app/planner' ? 'hidden lg:flex' : 'flex'
+          )}
           title="Add Task (⌘K)"
         >
           <Plus className="w-6 h-6" />

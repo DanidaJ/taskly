@@ -5,6 +5,8 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { getRemainingSeconds, useFocusCountdownStore } from '@/stores';
 import { activeFocusTimerService } from '@/services/api';
 import { subscribeToTimerBroadcasts } from '@/services/timerBroadcast';
+import { closeCountdownNotification, showCountdownNotification } from '@/utils/countdownNotification';
+import FocusPiP from './FocusPiP';
 
 const formatCountdown = (seconds: number): string => {
   const mins = Math.floor(seconds / 60);
@@ -27,7 +29,6 @@ export default function MiniFocusCountdown() {
   const clearSharedCountdown = useFocusCountdownStore((state) => state.clearSnapshot);
 
   const [remainingSeconds, setRemainingSeconds] = useState(() => getRemainingSeconds(endsAt, timeLeft));
-  const notificationRef = useRef<Notification | null>(null);
   const lastNotifiedMinuteRef = useRef<number | null>(null);
 
   // Listen for timer changes from other tabs so multi-tab usage stays in sync
@@ -128,56 +129,43 @@ export default function MiniFocusCountdown() {
     };
   }, [endsAt, isRunning, timeLeft]);
 
+  // Mirror the countdown into a single, quietly-updating notification while the
+  // app is backgrounded. It is refreshed at most once per remaining-minute, and
+  // replacing it never re-alerts (see utils/countdownNotification), so a long
+  // session shows one notification that ticks down rather than a stream of them.
   useEffect(() => {
-    if (!isRunning || remainingSeconds <= 0 || typeof window === 'undefined' || !("Notification" in window)) {
-      if (notificationRef.current) {
-        notificationRef.current.close();
-        notificationRef.current = null;
-      }
+    if (!isRunning || remainingSeconds <= 0) {
+      closeCountdownNotification();
       lastNotifiedMinuteRef.current = null;
       return;
     }
 
-    const maybeShowNotification = () => {
+    const syncNotification = () => {
       if (document.visibilityState !== 'hidden') {
-        if (notificationRef.current) {
-          notificationRef.current.close();
-          notificationRef.current = null;
-        }
+        closeCountdownNotification();
         lastNotifiedMinuteRef.current = null;
         return;
       }
 
-      if (Notification.permission !== 'granted') {
-        return;
-      }
-
-      const minuteBucket = Math.floor(remainingSeconds / 60);
-      if (minuteBucket === lastNotifiedMinuteRef.current) {
-        return;
-      }
-
+      const minuteBucket = Math.ceil(remainingSeconds / 60);
+      if (minuteBucket === lastNotifiedMinuteRef.current) return;
       lastNotifiedMinuteRef.current = minuteBucket;
-      if (notificationRef.current) {
-        notificationRef.current.close();
-      }
 
-      notificationRef.current = new Notification('Taskly countdown', {
-        body: `${taskName || modeLabel} · ${formatCountdown(remainingSeconds)} left`,
-        tag: 'taskly-focus-countdown',
-        requireInteraction: true,
-      });
+      showCountdownNotification(
+        'Taskly countdown',
+        `${taskName || modeLabel} · ${formatCountdown(remainingSeconds)} left`
+      );
     };
 
-    maybeShowNotification();
-    document.addEventListener('visibilitychange', maybeShowNotification);
-    const intervalId = window.setInterval(maybeShowNotification, 10000);
-
+    syncNotification();
+    document.addEventListener('visibilitychange', syncNotification);
     return () => {
-      document.removeEventListener('visibilitychange', maybeShowNotification);
-      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', syncNotification);
     };
   }, [isRunning, modeLabel, remainingSeconds, taskName]);
+
+  // Never leave a countdown notification behind if the shell unmounts (sign-out).
+  useEffect(() => () => { closeCountdownNotification(); }, []);
 
   const shouldShowMini = isRunning && remainingSeconds > 0 && location.pathname !== '/app/focus';
   if (!shouldShowMini) {
@@ -193,34 +181,44 @@ export default function MiniFocusCountdown() {
 
   return (
     <AnimatePresence>
-      <motion.button
+      <motion.div
         key="mini-focus-countdown"
         initial={{ opacity: 0, y: 20, scale: 0.92 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 12, scale: 0.95 }}
         transition={{ duration: 0.22 }}
-        onClick={() => navigate('/app/focus')}
-        className="fixed bottom-28 right-4 md:right-8 z-50 w-[220px] rounded-2xl border border-white/70 bg-white/90 backdrop-blur-xl shadow-[0_14px_32px_rgba(15,23,42,0.22)] p-3 text-left"
-        aria-label="Open focus timer"
+        className="fixed bottom-28 right-4 md:right-8 z-50 w-[220px] rounded-2xl border border-white/70 bg-white/90 backdrop-blur-xl shadow-[0_14px_32px_rgba(15,23,42,0.22)] p-3"
       >
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className={`inline-flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br ${timerTone}`}>
-              <Icon className="w-4 h-4 text-white" />
-            </span>
-            <div className="min-w-0">
-              <p className="text-[11px] uppercase tracking-wide text-gray-500">Countdown</p>
-              <p className="text-xs font-semibold text-gray-800 truncate">{taskName || modeLabel}</p>
+        <button
+          type="button"
+          onClick={() => navigate('/app/focus')}
+          className="w-full text-left"
+          aria-label="Open focus timer"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className={`inline-flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br ${timerTone}`}>
+                <Icon className="w-4 h-4 text-white" />
+              </span>
+              <div className="min-w-0">
+                <p className="text-[11px] uppercase tracking-wide text-gray-500">Countdown</p>
+                <p className="text-xs font-semibold text-gray-800 truncate">{taskName || modeLabel}</p>
+              </div>
             </div>
+            <ExternalLink className="w-3.5 h-3.5 text-gray-400" />
           </div>
-          <ExternalLink className="w-3.5 h-3.5 text-gray-400" />
-        </div>
 
-        <div className="mt-2 flex items-end justify-between">
-          <p className="text-2xl font-bold text-gray-900 tabular-nums">{formatCountdown(remainingSeconds)}</p>
-          <p className="text-[11px] font-medium text-gray-500">Tap to open</p>
+          <p className="mt-2 text-2xl font-bold text-gray-900 tabular-nums">
+            {formatCountdown(remainingSeconds)}
+          </p>
+        </button>
+
+        {/* FocusPiP renders nothing where Document PiP is unsupported. */}
+        <div className="mt-1 flex items-center justify-between">
+          <span className="text-[11px] font-medium text-gray-500">Tap to open</span>
+          <FocusPiP />
         </div>
-      </motion.button>
+      </motion.div>
     </AnimatePresence>
   );
 }

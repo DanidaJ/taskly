@@ -20,6 +20,9 @@ export default defineConfig({
         'logo.svg',
       ],
       workbox: {
+        // Folds our own notificationclick handler into the generated worker.
+        // generateSW has no other hook for custom event listeners.
+        importScripts: ['/sw-custom.js'],
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         runtimeCaching: [
           {
