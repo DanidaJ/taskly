@@ -26,6 +26,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { format } from 'date-fns';
 import { parseDuration } from '@/utils';
 import TaskStartConfirmModal, { StartContext } from '@/components/TaskStartConfirmModal';
+import FocusPiP from '@/components/FocusPiP';
 
 type TimerMode = 'focus' | 'shortBreak' | 'longBreak';
 
@@ -1149,6 +1150,12 @@ export default function FocusTimer() {
               <VolumeX className="w-6 h-6" />
             )}
           </Button>
+        </div>
+
+        {/* Float the countdown in an always-on-top window so it stays visible
+            after the browser is minimised. Hidden where Document PiP is absent. */}
+        <div className="mt-4 flex justify-center">
+          <FocusPiP showLabel />
         </div>
 
         {/* Finish early — complete the task before the timer runs out */}
